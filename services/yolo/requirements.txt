@@ -1,0 +1,20 @@
+# FastAPI and Uvicorn (for web API)
+fastapi>=0.95.0
+uvicorn>=0.21.1
+httpx>=0.28.1
+
+# Pillow for image handling
+pillow>=9.5.0
+
+# Use headless OpenCV to avoid missing display/xcb libs on slim images
+opencv-python-headless>=4.7.0
+
+# Ultralytics YOLOv8 (includes minimal dependencies)
+ultralytics>=8.0.0
+python-multipart>=0.0.6
+
+# Metrics
+prometheus-fastapi-instrumentator>=6.0.0
+
+# Testing
+pytest>=7.0.0
