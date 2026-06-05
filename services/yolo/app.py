@@ -8,6 +8,8 @@ import logging
 import os
 import uuid
 import shutil
+import time
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -24,7 +26,7 @@ Instrumentator().instrument(app).expose(app)
 # Detections below this score are discarded.
 # Override with: export CONFIDENCE_THRESHOLD=0.7
 _raw_threshold = os.environ.get("CONFIDENCE_THRESHOLD")
-if _raw_threshold is not None:
+if _raw_threshold is not None:  # pragma: no cover
     CONFIDENCE_THRESHOLD = float(_raw_threshold)
     logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD} (from environment)")
 else:
@@ -94,9 +96,8 @@ def save_detection_object(prediction_uid, label, score, box):
 
 @app.post("/predict")
 def predict(file: UploadFile = File(...)):
-    """
-    Predict objects in an image
-    """
+    start_time = time.time()
+
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
@@ -105,14 +106,14 @@ def predict(file: UploadFile = File(...)):
     with open(original_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
+    results = model(original_path, device="cpu")
 
-    annotated_frame = results[0].plot()  # NumPy image with boxes
+    annotated_frame = results[0].plot()
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
     save_prediction_session(uid, original_path, predicted_path)
-    
+
     detected_labels = []
     for box in results[0].boxes:
         label_idx = int(box.cls[0].item())
@@ -122,12 +123,14 @@ def predict(file: UploadFile = File(...)):
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
 
-    return {
-        "prediction_uid": uid, 
-        "detection_count": len(results[0].boxes),
-        "labels": detected_labels
-    }
+    processing_time = round(time.time() - start_time, 2)
 
+    return {
+         "prediction_uid": uid,
+         "detection_count": len(results[0].boxes),
+         "labels": detected_labels,
+        "time_took": processing_time
+     }
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str):
     """
@@ -176,6 +179,92 @@ def get_prediction_image(uid: str):
     return FileResponse(row[0])
 
 
+
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+
+    if not label.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Label cannot be empty"
+        )
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        sessions = conn.execute(
+            """
+            SELECT DISTINCT ps.*
+            FROM prediction_sessions ps
+            JOIN detection_objects d
+            ON ps.uid = d.prediction_uid
+            WHERE d.label = ?
+            """,
+            (label,)
+        ).fetchall()
+
+        results = []
+
+        for session in sessions:
+
+            objects = conn.execute(
+                """
+                SELECT *
+                FROM detection_objects
+                WHERE prediction_uid = ? AND label = ?
+                """,
+                (session["uid"], label)
+            ).fetchall()
+
+            results.append({
+                "uid": session["uid"],
+                "timestamp": session["timestamp"],
+                "detection_objects": [
+                    {
+                        "id": obj["id"],
+                        "label": obj["label"],
+                        "score": obj["score"],
+                        "box": obj["box"]
+                    }
+                    for obj in objects
+                ]
+            })
+
+        return results
+@app.get("/predictions/score/{min_score}")
+def get_predictions_by_score(min_score: float):
+
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail="min_score must be between 0.0 and 1.0"
+        )
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        objects = conn.execute(
+            """
+            SELECT *
+            FROM detection_objects
+            WHERE score >= ?
+            """,
+            (min_score,)
+        ).fetchall()
+
+        return [
+            {
+                "id": obj["id"],
+                "prediction_uid": obj["prediction_uid"],
+                "label": obj["label"],
+                "score": obj["score"],
+                "box": obj["box"]
+            }
+            for obj in objects
+        ]
+
+
+
 @app.get("/health")
 def health():
     """
@@ -183,7 +272,7 @@ def health():
     """
     return {"status": "ok"}
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
     init_db()
