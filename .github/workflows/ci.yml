@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  test-yolo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r services/yolo/torch-requirements.txt
+          pip install -r services/yolo/requirements.txt
+
+      - name: Run tests with coverage
+        run: PYTHONPATH=. pytest tests/ --cov=app --cov-report=xml
+        working-directory: services/yolo
+
+      - name: Run tests with coverage
+        run: pytest tests/
+        working-directory: services/yolo
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: services/yolo/coverage.xml
+          fail_ci_if_error: true
