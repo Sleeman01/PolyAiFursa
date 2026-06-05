@@ -33,6 +33,6 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
-          token: ${{ 6a68fefc-97d9-479c-89c0-7ff590f45af4 }}
+          token: ${{ secrets.CODECOV_TOKEN }}
           file: services/yolo/coverage.xml
           fail_ci_if_error: true
