@@ -26,8 +26,12 @@ jobs:
         run: PYTHONPATH=. pytest tests/ --cov=app --cov-report=xml
         working-directory: services/yolo
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: services/yolo/coverage.xml
-          fail_ci_if_error: true
+      -       - name: Run tests with coverage
+        run: pytest tests/
+        working-directory: services/yolo
+
++     - name: Upload coverage to Codecov
++       uses: codecov/codecov-action@v3
++       with:
++         file: services/yolo/coverage.xml
++         fail_ci_if_error: true
