@@ -9,7 +9,8 @@ import os
 import uuid
 import shutil
 import time
-
+import signal
+import sys
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -272,9 +273,19 @@ def health():
     """
     return {"status": "ok"}
 
+
+def handle_sigterm(signum, frame):
+    """
+    Handle SIGTERM for graceful shutdown.
+    systemd sends SIGTERM when restarting or stopping the service.
+    """
+    print("INFO: Received SIGTERM, shutting down YOLO service gracefully...", flush=True)
+    sys.exit(0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
-
+    signal.signal(signal.SIGTERM, handle_sigterm)
     init_db()
     
     uvicorn.run(app, host="0.0.0.0", port=8080)
