@@ -263,8 +263,9 @@ def get_predictions_by_score(min_score: float):
             for obj in objects
         ]
 
-
-
+@app.on_event("shutdown")
+def graceful_shutdown():
+    logging.info("Received SIGTERM, shutting down YOLO service gracefully...")
 @app.get("/health")
 def health():
     """
@@ -272,9 +273,11 @@ def health():
     """
     return {"status": "ok"}
 
+
+
+
+
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
-
     init_db()
-    
     uvicorn.run(app, host="0.0.0.0", port=8080)
