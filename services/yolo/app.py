@@ -274,6 +274,14 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/Welcome")
+def Welcome():
+    """
+    Welcoming EndPoint
+    """
+    return {"message" : "WelcomeToNewFeature"}
+
+
 
 
 
