@@ -283,6 +283,19 @@ def morning():
     return {"message": "Good morning"}
 
 
+
+
+
+@app.get("/onePlusTwo")
+def onePlusTwo():
+    return {"OnePlusTwo Equals to" : "Three"}
+
+
+
+
+
+
+
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
     init_db()
