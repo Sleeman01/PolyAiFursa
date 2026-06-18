@@ -278,6 +278,10 @@ def health():
 def welcoming():
     return {"message": "welcome"}
 
+@app.get("/morning")
+def morning():
+    return {"message": "Good morning"}
+
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
