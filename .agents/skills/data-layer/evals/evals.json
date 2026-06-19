@@ -1,0 +1,84 @@
+{
+  "skill_name": "yolo-api-data-layer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "refactor the api to use sqlalchemy",
+      "expected_output": "models.py and db.py are created, app.py endpoints use Depends(get_db) and the ORM, old raw-SQL helpers are removed, tests are migrated, and pytest passes.",
+      "files": [],
+      "expectations": [
+        "models.py defines PredictionSession and DetectionObject as declarative SQLAlchemy models with correct column types.",
+        "db.py defines engine, SessionLocal, get_db() generator, and init_db() calling Base.metadata.create_all.",
+        "Every database-touching endpoint in app.py has db: Session = Depends(get_db).",
+        "app.py contains no import sqlite3, no conn.execute, no raw SQL strings, no DB_PATH.",
+        "pytest tests/ passes with all tests green and no regression in coverage.",
+        "DetectionObject model includes indexes idx_prediction_uid, idx_label, idx_score."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "add an endpoint GET /predictions/recent that returns the 10 most recent sessions",
+      "expected_output": "A new GET /predictions/recent endpoint queries sessions ordered by timestamp descending limited to 10, using the ORM. A test covers ordering and the limit.",
+      "files": [],
+      "expectations": [
+        "app.py has a GET /predictions/recent route with db: Session = Depends(get_db).",
+        "The query uses .order_by(PredictionSession.timestamp.desc()).limit(10) with no raw SQL.",
+        "Returns a list of session objects with uid, timestamp, original_image, predicted_image.",
+        "At least one new test asserts at most 10 results and most-recent-first ordering.",
+        "pytest tests/ passes and no existing endpoint behaviour changed."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "add a UserFeedback table to track user ratings per prediction",
+      "expected_output": "A UserFeedback SQLAlchemy model is added to models.py, the table is created via create_all, and endpoints to create and read feedback are added with 404 if the prediction does not exist.",
+      "files": [],
+      "expectations": [
+        "models.py defines UserFeedback with at least id, prediction_uid, and rating columns.",
+        "No hand-written CREATE TABLE is added.",
+        "New endpoints use db: Session = Depends(get_db) and return 404 for unknown prediction uid.",
+        "Tests cover create, read, and not-found paths.",
+        "pytest tests/ passes and no existing endpoint is changed."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "add a column processing_time_ms to the prediction_sessions table",
+      "expected_output": "A nullable processing_time_ms column is added to PredictionSession, populated in POST /predict, with a note that existing Postgres tables need a real migration.",
+      "files": [],
+      "expectations": [
+        "PredictionSession gains processing_time_ms with a numeric type and nullable=True.",
+        "POST /predict stores the value before db.commit().",
+        "No raw ALTER TABLE or SQL string is added.",
+        "Agent flags that create_all does not alter existing tables in production.",
+        "pytest tests/ passes and existing response shapes are unchanged."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "delete a prediction session and all its detection objects by uid",
+      "expected_output": "A DELETE endpoint removes the session and its detection objects via the ORM in one transaction, returns 404 for unknown uid, covered by tests.",
+      "files": [],
+      "expectations": [
+        "app.py has a DELETE /prediction/{uid} route with db: Session = Depends(get_db).",
+        "Handler deletes DetectionObject rows then PredictionSession row then db.commit().",
+        "Unknown uid returns 404 matching existing error style.",
+        "No raw SQL is used.",
+        "Tests cover successful delete and 404 path, pytest passes."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "make the database backend configurable so we can use postgres in production",
+      "expected_output": "db.py selects SQLite or Postgres from DB_BACKEND env var, check_same_thread only for SQLite, psycopg2-binary added to requirements, app behaviour identical on both backends.",
+      "files": [],
+      "expectations": [
+        "db.py reads DB_BACKEND and builds postgresql:// or sqlite:/// URL accordingly.",
+        "connect_args check_same_thread is only applied for SQLite.",
+        "requirements.txt gains psycopg2-binary and sqlalchemy.",
+        "No endpoint code in app.py changes to switch backends.",
+        "pytest tests/ passes and agent describes how to verify with Docker Postgres."
+      ]
+    }
+  ]
+}

@@ -1,19 +1,35 @@
 import os
 import pytest
 from fastapi.testclient import TestClient
-import sqlite3
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-
-from app import app, init_db
+from app import app
+from db import get_db
+from models import Base, PredictionSession, DetectionObject
 
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
 @pytest.fixture(autouse=True)
-def setup_db(tmp_path, monkeypatch):
-    db_file = str(tmp_path / "test_predictions.db")
-    monkeypatch.setattr("app.DB_PATH", db_file)
-    init_db()
+def db_session(tmp_path):
+    db_file = tmp_path / "test_predictions.db"
+    engine = create_engine(
+        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
+    )
+    TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    Base.metadata.create_all(bind=engine)
+
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    yield TestingSessionLocal
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -27,30 +43,17 @@ def test_health(client):
     assert response.json() == {"status": "ok"}
 
 
+def insert_sample_data(db_session):
+    db = db_session()
+    db.add(PredictionSession(uid="abc-123", original_image="original.jpg", predicted_image="predicted.jpg"))
+    db.add(DetectionObject(prediction_uid="abc-123", label="person", score=0.91, box="[10, 20, 100, 200]"))
+    db.add(DetectionObject(prediction_uid="abc-123", label="car", score=0.45, box="[1, 2, 3, 4]"))
+    db.commit()
+    db.close()
 
 
-def insert_sample_data():
-    import app as app_module
-
-    with sqlite3.connect(app_module.DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-            VALUES (?, ?, ?)
-        """, ("abc-123", "original.jpg", "predicted.jpg"))
-
-        conn.execute("""
-            INSERT INTO detection_objects (prediction_uid, label, score, box)
-            VALUES (?, ?, ?, ?)
-        """, ("abc-123", "person", 0.91, "[10, 20, 100, 200]"))
-
-        conn.execute("""
-            INSERT INTO detection_objects (prediction_uid, label, score, box)
-            VALUES (?, ?, ?, ?)
-        """, ("abc-123", "car", 0.45, "[1, 2, 3, 4]"))
-
-
-def test_get_predictions_by_label_found(client):
-    insert_sample_data()
+def test_get_predictions_by_label_found(client, db_session):
+    insert_sample_data(db_session)
 
     response = client.get("/predictions/label/person")
 
@@ -68,8 +71,8 @@ def test_get_predictions_by_label_not_found(client):
     assert response.json() == []
 
 
-def test_get_predictions_by_score_found(client):
-    insert_sample_data()
+def test_get_predictions_by_score_found(client, db_session):
+    insert_sample_data(db_session)
 
     response = client.get("/predictions/score/0.5")
 
@@ -80,8 +83,8 @@ def test_get_predictions_by_score_found(client):
     assert data[0]["score"] == 0.91
 
 
-def test_get_predictions_by_score_not_found(client):
-    insert_sample_data()
+def test_get_predictions_by_score_not_found(client, db_session):
+    insert_sample_data(db_session)
 
     response = client.get("/predictions/score/0.99")
 
@@ -103,15 +106,15 @@ def test_get_predictions_by_score_invalid_high(client):
     assert response.json()["detail"] == "min_score must be between 0.0 and 1.0"
 
 
-
-
 def test_get_predictions_by_label_empty(client):
     response = client.get("/predictions/label/%20")
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Label cannot be empty"
-def test_get_prediction_by_uid_found(client):
-    insert_sample_data()
+
+
+def test_get_prediction_by_uid_found(client, db_session):
+    insert_sample_data(db_session)
 
     response = client.get("/prediction/abc-123")
 
@@ -128,18 +131,14 @@ def test_get_prediction_by_uid_not_found(client):
     assert response.json()["detail"] == "Prediction not found"
 
 
-def test_get_prediction_image_found(client, tmp_path):
-    import app as app_module
-    import sqlite3
-
+def test_get_prediction_image_found(client, db_session, tmp_path):
     image_file = tmp_path / "predicted.jpg"
     image_file.write_bytes(b"fake image content")
 
-    with sqlite3.connect(app_module.DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-            VALUES (?, ?, ?)
-        """, ("img-123", "original.jpg", str(image_file)))
+    db = db_session()
+    db.add(PredictionSession(uid="img-123", original_image="original.jpg", predicted_image=str(image_file)))
+    db.commit()
+    db.close()
 
     response = client.get("/prediction/img-123/image")
 
