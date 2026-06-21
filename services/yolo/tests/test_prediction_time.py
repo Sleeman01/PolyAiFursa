@@ -1,9 +1,13 @@
 import os
 import unittest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import tempfile
 
-
-from app import app, init_db
+from app import app
+from db import get_db
+from models import Base
 
 
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
@@ -12,8 +16,26 @@ TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 class TestPredictionTime(unittest.TestCase):
 
     def setUp(self):
-        init_db()
+        self.tmp_dir = tempfile.mkdtemp()
+        db_file = os.path.join(self.tmp_dir, "test_predictions.db")
+        engine = create_engine(
+            f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
+        )
+        TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        Base.metadata.create_all(bind=engine)
+
+        def override_get_db():
+            db = TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
         self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
 
     def test_predict_includes_processing_time(self):
         with open(TEST_IMAGE, "rb") as f:
