@@ -15,6 +15,7 @@ from db import get_db, init_db
 from models import PredictionSession, DetectionObject
 
 
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Disable GPU usage
@@ -184,6 +185,9 @@ def get_predictions_by_score(min_score: float, db: Session = Depends(get_db)):
 def graceful_shutdown():
     logging.info("Received SIGTERM, shutting down YOLO service gracefully...")
 
+@app.on_event("shutdown")
+def graceful_shutdown():
+    logging.info("Received SIGTERM, shutting down YOLO service gracefully...")
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -208,6 +212,7 @@ def onePlusTwo():
 @app.get("/timen")
 def timen():
     return datetime.now()
+
 
 
 if __name__ == "__main__":  # pragma: no cover
