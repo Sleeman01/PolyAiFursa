@@ -9,6 +9,7 @@ import os
 import uuid
 import shutil
 import time
+from datetime import datetime
 
 from db import get_db, init_db
 from models import PredictionSession, DetectionObject
@@ -200,6 +201,13 @@ def morning():
 @app.get("/onePlusTwo")
 def onePlusTwo():
     return {"OnePlusTwo Equals to" : "Three"}
+
+
+
+
+@app.get("/timen")
+def timen():
+    return datetime.now()
 
 
 if __name__ == "__main__":  # pragma: no cover
