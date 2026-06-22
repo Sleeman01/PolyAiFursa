@@ -32,6 +32,7 @@ ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
+    "google_genai:gemini-2.5-flash-lite",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -47,7 +48,7 @@ SYSTEM_PROMPT = (
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
-
+_prediction_holder: dict = {}
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -62,7 +63,10 @@ def detect_objects() -> str:
             files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
         )
         response.raise_for_status()
-    return json.dumps(response.json())
+    data = response.json()
+    if data.get("prediction_uid"):
+        _prediction_holder["uid"] = data["prediction_uid"]
+    return json.dumps(data)
 
 
 # Registry: map tool name -> tool function
@@ -108,7 +112,7 @@ app = FastAPI(title="Vision Agent")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
-    allow_methods=["POST", "GET"],
+    allow_methods=["*"],
     allow_headers=["Content-Type"],
 )
 
@@ -125,6 +129,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    annotated_image_base64: Optional[str] = None
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -144,10 +149,23 @@ def chat(request: ChatRequest):
             lc_messages.append(AIMessage(content=msg.content))
 
     token = _current_image_b64.set(latest_image)
+    _prediction_holder.pop("uid", None)
     try:
-        return ChatResponse(response=run_agent(lc_messages))
+        answer = run_agent(lc_messages)
+        annotated = None
+        uid = _prediction_holder.get("uid")
+        if uid:
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                    img_resp.raise_for_status()
+                annotated = base64.b64encode(img_resp.content).decode("utf-8")
+            except Exception:
+                annotated = None
+        return ChatResponse(response=answer, annotated_image_base64=annotated)
     finally:
         _current_image_b64.reset(token)
+        _prediction_holder.pop("uid", None)
 
 
 @app.get("/health")
