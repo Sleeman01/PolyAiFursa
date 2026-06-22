@@ -2,8 +2,9 @@ import type { ChatMessage } from "./types";
 
 const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:8000";
 
-export async function sendMessage(messages: ChatMessage[]): Promise<string> {
-  const res = await fetch(`${AGENT_URL}/chat`, {
+export async function sendMessage(
+  messages: ChatMessage[]
+): Promise<{ response: string; annotated_image_base64?: string }> {  const res = await fetch(`${AGENT_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages }),
@@ -13,5 +14,8 @@ export async function sendMessage(messages: ChatMessage[]): Promise<string> {
     throw new Error(text || res.statusText);
   }
   const data = await res.json();
-  return data.response as string;
+  return {
+    response: data.response as string,
+    annotated_image_base64: data.annotated_image_base64 as string | undefined,
+  };
 }
