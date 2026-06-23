@@ -5,7 +5,7 @@ import logging
 import os
 from contextvars import ContextVar
 from typing import Optional
-
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -74,7 +74,13 @@ TOOLS = {
     detect_objects.name: detect_objects
 }
 
-llm = init_chat_model(MODEL, temperature=0)
+_rate_limiter = InMemoryRateLimiter(
+    requests_per_second=0.16,
+    check_every_n_seconds=0.1,
+    max_bucket_size=3,
+)
+
+llm = init_chat_model(MODEL, temperature=0, rate_limiter=_rate_limiter)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
 def run_agent(history: list, max_iterations: int = 10) -> str:
@@ -112,9 +118,14 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
 
 app = FastAPI(title="Vision Agent")
 
+_cors_origins = os.environ.get(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:3000",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
     allow_methods=["*"],
     allow_headers=["Content-Type"],
 )
