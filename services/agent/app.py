@@ -5,7 +5,7 @@ import logging
 import os
 from contextvars import ContextVar
 from typing import Optional
-
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -74,7 +74,13 @@ TOOLS = {
     detect_objects.name: detect_objects
 }
 
-llm = init_chat_model(MODEL, temperature=0)
+_rate_limiter = InMemoryRateLimiter(
+    requests_per_second=0.16,
+    check_every_n_seconds=0.1,
+    max_bucket_size=3,
+)
+
+llm = init_chat_model(MODEL, temperature=0, rate_limiter=_rate_limiter)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
 def run_agent(history: list) -> str:
