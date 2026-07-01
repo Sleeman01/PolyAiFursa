@@ -1,5 +1,6 @@
 import os
 import pytest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -132,20 +133,20 @@ def test_get_prediction_by_uid_not_found(client):
 
 
 def test_get_prediction_image_found(client, db_session, tmp_path):
-    image_file = tmp_path / "predicted.jpg"
-    image_file.write_bytes(b"fake image content")
-
     db = db_session()
-    db.add(PredictionSession(uid="img-123", original_image="original.jpg", predicted_image=str(image_file)))
+    db.add(PredictionSession(uid="img-123", original_image="some/original/image.jpg", predicted_image="some/predicted/image.jpg"))
     db.commit()
     db.close()
 
-    response = client.get("/prediction/img-123/image")
+    def fake_download(bucket, key, dest):
+        with open(dest, "wb") as f:
+            f.write(b"fake image content")
 
+    with patch("app.AWS_S3_BUCKET", "test-bucket"), \
+         patch("app.s3_client.download_file", side_effect=fake_download):
+        response = client.get("/prediction/img-123/image")
     assert response.status_code == 200
     assert response.content == b"fake image content"
-
-
 def test_get_prediction_image_not_found(client):
     response = client.get("/prediction/missing/image")
 
