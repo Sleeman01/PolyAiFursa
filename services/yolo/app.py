@@ -13,6 +13,12 @@ from datetime import datetime
 
 from db import get_db, init_db
 from models import PredictionSession, DetectionObject
+import boto3
+
+# S3 configuration from environment variables (never hard-code)
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 
 
@@ -49,24 +55,37 @@ model = YOLO("yolov8n.pt")
 
 
 @app.post("/predict")
-def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def predict(request: dict, db: Session = Depends(get_db)):
     start_time = time.time()
 
-    ext = os.path.splitext(file.filename)[1]
-    uid = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
-    predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
+    image_s3_key = request.get("image_s3_key")
+    if not image_s3_key:
+        raise HTTPException(status_code=400, detail="image_s3_key is required")
+    if not AWS_S3_BUCKET:
+        raise HTTPException(status_code=500, detail="AWS_S3_BUCKET env var is not set")
 
-    with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    uid = str(uuid.uuid4())
+    ext = os.path.splitext(image_s3_key)[1] or ".jpg"
+
+    # Download the original image from S3
+    original_path = os.path.join(UPLOAD_DIR, uid + ext)
+    s3_client.download_file(AWS_S3_BUCKET, image_s3_key, original_path)
 
     results = model(original_path, device="cpu")
 
     annotated_frame = results[0].plot()
     annotated_image = Image.fromarray(annotated_frame)
+    predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
     annotated_image.save(predicted_path)
 
-    db.add(PredictionSession(uid=uid, original_image=original_path, predicted_image=predicted_path))
+    # Upload the predicted image to S3, mirroring the original key path
+    if "/original/" in image_s3_key:
+        predicted_s3_key = image_s3_key.replace("/original/", "/predicted/", 1)
+    else:
+        predicted_s3_key = f"predicted/{uid}{ext}"
+    s3_client.upload_file(predicted_path, AWS_S3_BUCKET, predicted_s3_key)
+
+    db.add(PredictionSession(uid=uid, original_image=image_s3_key, predicted_image=predicted_s3_key))
 
     detected_labels = []
     for box in results[0].boxes:
@@ -85,7 +104,9 @@ def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
          "prediction_uid": uid,
          "detection_count": len(results[0].boxes),
          "labels": detected_labels,
-        "time_took": processing_time
+         "time_took": processing_time,
+         "image_s3_key": image_s3_key,
+         "predicted_s3_key": predicted_s3_key
      }
 
 @app.get("/prediction/{uid}")
@@ -115,9 +136,18 @@ def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str, db: Session = Depends(get_db)):
     session = db.query(PredictionSession).filter_by(uid=uid).first()
-    if not session or not os.path.exists(session.predicted_image):
+    if not session:
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(session.predicted_image)
+
+    # predicted_image is now an S3 key; download it and stream the bytes back
+    if not AWS_S3_BUCKET:
+        raise HTTPException(status_code=500, detail="AWS_S3_BUCKET env var is not set")
+    try:
+        local_path = os.path.join(PREDICTED_DIR, f"dl_{uid}.jpg")
+        s3_client.download_file(AWS_S3_BUCKET, session.predicted_image, local_path)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Image not found in S3")
+    return FileResponse(local_path)
 
 
 @app.get("/predictions/label/{label}")
