@@ -168,17 +168,27 @@ async def _apply_mcp_transform(tool_name: str, region_b64: str, params: dict) ->
 
 
 @tool
-async def process_region(tool_name: str, box: list, params: dict = None) -> str:
-    """Apply an image transformation to a specific region of the user's current image and composite it back.
-    - tool_name: one of rotate, flip, blur, resize, crop, add_noise
-    - box: [x1, y1, x2, y2] pixel coordinates of the region (e.g. from get_detections)
-    - params: extra parameters for the tool (e.g. {"radius": 5} for blur, {"angle": 90} for rotate)
-    Returns a JSON object with the resulting full image as base64 under 'image_b64'."""
+async def process_region(tool_name: str, box: list, blur_radius: float = 3.0, angle: float = 90.0, direction: str = "horizontal") -> str:
+    """Apply an image transformation to a specific region of the user's image and composite it back.
+    - tool_name: one of "blur", "rotate", "flip", "add_noise"
+    - box: [x1, y1, x2, y2] pixel coordinates of the region (from get_detections)
+    - blur_radius: used when tool_name is "blur" (default 3.0)
+    - angle: used when tool_name is "rotate" (default 90)
+    - direction: used when tool_name is "flip", either "horizontal" or "vertical"
+    Returns a short status; the edited image is sent back to the user automatically."""
     import base64 as _b64
     image_b64 = _current_image_b64.get()
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
-    params = params or {}
+    # Build params for the chosen tool
+    if tool_name == "blur":
+        params = {"radius": blur_radius}
+    elif tool_name == "rotate":
+        params = {"angle": angle}
+    elif tool_name == "flip":
+        params = {"direction": direction}
+    else:
+        params = {}
 
     from PIL import Image
 
@@ -208,7 +218,9 @@ async def process_region(tool_name: str, box: list, params: dict = None) -> str:
     full.save(out, format="PNG")
     result_b64 = _b64.b64encode(out.getvalue()).decode()
     _prediction_holder["result_image_b64"] = result_b64
-    return json.dumps({"status": "ok", "image_b64": result_b64})
+    # Do NOT return the base64 image to the LLM (it blows the token limit).
+    # The image is stored and returned to the user by the /chat handler.
+    return json.dumps({"status": "ok", "message": f"Applied {tool_name} to the region and produced the edited image."})
 
 
 # Local tools the agent always has
@@ -324,18 +336,24 @@ async def chat(request: ChatRequest):
     token = _current_image_b64.set(latest_image)
     chat_token = _current_chat_id.set(chat_id)
     _prediction_holder.pop("uid", None)
+    _prediction_holder.pop("result_image_b64", None)
     try:
         answer = await run_agent(lc_messages)
         annotated = None
-        uid = _prediction_holder.get("uid")
-        if uid:
-            try:
-                with httpx.Client(timeout=30.0) as client:
-                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
-                    img_resp.raise_for_status()
-                annotated = base64.b64encode(img_resp.content).decode("utf-8")
-            except Exception:
-                annotated = None
+        # If an image edit (process_region) produced a result, return that.
+        edited = _prediction_holder.get("result_image_b64")
+        if edited:
+            annotated = edited
+        else:
+            uid = _prediction_holder.get("uid")
+            if uid:
+                try:
+                    with httpx.Client(timeout=30.0) as client:
+                        img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                        img_resp.raise_for_status()
+                    annotated = base64.b64encode(img_resp.content).decode("utf-8")
+                except Exception:
+                    annotated = None
         return ChatResponse(response=answer, annotated_image_base64=annotated)
     finally:
         _current_image_b64.reset(token)
