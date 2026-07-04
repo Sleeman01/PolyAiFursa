@@ -3,6 +3,8 @@ import io
 import json
 import logging
 import os
+import uuid
+import boto3
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -27,12 +29,18 @@ from pydantic import BaseModel
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
 
+# S3 configuration from environment variables (never hard-code)
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.environ.get("AWS_S3_BUCKET")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
+
 # Text-only models
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
     "google_genai:gemini-2.5-flash-lite",
+    "bedrock_converse:amazon.nova-lite-v1:0",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -48,6 +56,7 @@ SYSTEM_PROMPT = (
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+_current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", default=None)
 _prediction_holder: dict = {}
 @tool
 def detect_objects() -> str:
@@ -56,11 +65,24 @@ def detect_objects() -> str:
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
 
+    if not AWS_S3_BUCKET:
+        return json.dumps({"error": "AWS_S3_BUCKET env var is not set."})
+
     image_bytes = base64.b64decode(image_b64)
-    with httpx.Client(timeout=30.0) as client:
+
+    # Build an S3 key organised by chat and prediction id
+    chat_id = _current_chat_id.get() or "unknown-chat"
+    prediction_id = str(uuid.uuid4())
+    original_key = f"{chat_id}/{prediction_id}/original/image.jpg"
+
+    # Upload the original image to S3
+    s3_client.upload_fileobj(io.BytesIO(image_bytes), AWS_S3_BUCKET, original_key)
+
+    # Call Yolo with ONLY the S3 key (not the image bytes)
+    with httpx.Client(timeout=60.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+            json={"image_s3_key": original_key},
         )
         response.raise_for_status()
     data = response.json()
@@ -162,7 +184,9 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
+    chat_id = str(uuid.uuid4())
     token = _current_image_b64.set(latest_image)
+    chat_token = _current_chat_id.set(chat_id)
     _prediction_holder.pop("uid", None)
     try:
         answer = run_agent(lc_messages)
@@ -179,6 +203,7 @@ def chat(request: ChatRequest):
         return ChatResponse(response=answer, annotated_image_base64=annotated)
     finally:
         _current_image_b64.reset(token)
+        _current_chat_id.reset(chat_token)
         _prediction_holder.pop("uid", None)
 
 

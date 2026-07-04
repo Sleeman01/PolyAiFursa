@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import tempfile
+import shutil
+from unittest.mock import patch
 
 from app import app
 from db import get_db
@@ -38,14 +40,17 @@ class TestPredictionTime(unittest.TestCase):
         app.dependency_overrides.clear()
 
     def test_predict_includes_processing_time(self):
-        with open(TEST_IMAGE, "rb") as f:
+        def fake_download(bucket, key, dest):
+            shutil.copy(TEST_IMAGE, dest)
+
+        with patch("app.AWS_S3_BUCKET", "test-bucket"), \
+             patch("app.s3_client.download_file", side_effect=fake_download), \
+             patch("app.s3_client.upload_file", return_value=None):
             response = self.client.post(
                 "/predict",
-                files={"file": ("beatles.jpeg", f, "image/jpeg")}
+                json={"image_s3_key": "some-chat/some-pred/original/beatles.jpeg"}
             )
-
         assert response.status_code == 200
         data = response.json()
-
         assert "time_took" in data
         assert isinstance(data["time_took"], float)
