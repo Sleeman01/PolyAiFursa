@@ -1,0 +1,136 @@
+name: CI/CD
+
+# Adjust the paths in the `changes` job to match your actual repo layout.
+# Assumed: services/yolo, services/img-proc-mcp, services/agent, services/frontend
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      yolo: ${{ steps.filter.outputs.yolo }}
+      img_proc_mcp: ${{ steps.filter.outputs.img_proc_mcp }}
+      agent: ${{ steps.filter.outputs.agent }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      monitoring: ${{ steps.filter.outputs.monitoring }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            yolo:
+              - 'services/yolo/**'
+            img_proc_mcp:
+              - 'services/img-proc-mcp/**'
+            agent:
+              - 'services/agent/**'
+            frontend:
+              - 'services/frontend/**'
+            monitoring:
+              - 'monitoring/**'
+              - 'docker-compose.yaml'
+
+  test:
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: img-proc-mcp
+            changed: ${{ needs.changes.outputs.img_proc_mcp }}
+          - name: agent
+            changed: ${{ needs.changes.outputs.agent }}
+          - name: frontend
+            changed: ${{ needs.changes.outputs.frontend }}
+          - name: yolo
+            changed: ${{ needs.changes.outputs.yolo }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.changed == 'true'
+
+      - name: Set up Python
+        if: matrix.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run service test suite
+        if: matrix.changed == 'true'
+        working-directory: services/${{ matrix.name }}
+        run: |
+          pip install -r requirements.txt
+          pytest -q
+
+  build-and-push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: yolo
+            changed: ${{ needs.changes.outputs.yolo }}
+            context: services/yolo
+          - name: img-proc-mcp
+            changed: ${{ needs.changes.outputs.img_proc_mcp }}
+            context: services/img-proc-mcp
+          - name: agent
+            changed: ${{ needs.changes.outputs.agent }}
+            context: services/agent
+          - name: frontend
+            changed: ${{ needs.changes.outputs.frontend }}
+            context: services/frontend
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.changed == 'true'
+
+      - name: Log in to DockerHub
+        if: matrix.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (tag = commit SHA)
+        if: matrix.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: sleemaneketeh/${{ matrix.name }}:${{ github.sha }}
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy to prod
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/PolyAiFursa
+            git pull origin main
+
+            SHA="${{ github.sha }}"
+            [ "${{ needs.changes.outputs.yolo }}" = "true" ] && \
+              sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && \
+              sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.agent }}" = "true" ] && \
+              sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.frontend }}" = "true" ] && \
+              sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
+
+            docker compose pull
+            docker compose up -d
+            docker compose ps
