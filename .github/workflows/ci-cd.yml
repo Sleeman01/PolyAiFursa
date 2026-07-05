@@ -24,6 +24,8 @@ jobs:
       monitoring: ${{ steps.filter.outputs.monitoring }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # paths-filter needs full history to diff against event.before
       - uses: dorny/paths-filter@v3
         id: filter
         with:
