@@ -1,6 +1,6 @@
 services:
   yolo:
-    image: sleemaneketeh/yolo-service:${TAG:-latest}
+    image: sleemaneketeh/yolo-service:${YOLO_TAG:-latest}
     build: ./services/yolo
     environment:
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -11,7 +11,7 @@ services:
       - polyai-net
 
   img-proc-mcp:
-    image: sleemaneketeh/img-proc-mcp:${TAG:-latest}
+    image: sleemaneketeh/img-proc-mcp:${IMG_PROC_MCP_TAG:-latest}
     build: ./services/img-proc-mcp
     environment:
       - MCP_PORT=9000
@@ -19,7 +19,7 @@ services:
       - polyai-net
 
   agent:
-    image: sleemaneketeh/agent:${TAG:-latest}
+    image: sleemaneketeh/agent:${AGENT_TAG:-latest}
     build: ./services/agent
     environment:
       - YOLO_SERVICE_URL=http://yolo:8080
@@ -36,7 +36,7 @@ services:
       - img-proc-mcp
 
   frontend:
-    image: sleemaneketeh/frontend:${TAG:-latest}
+    image: sleemaneketeh/frontend:${FRONTEND_TAG:-latest}
     build: ./services/frontend
     ports:
       - "3000:3000"
