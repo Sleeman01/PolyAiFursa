@@ -181,7 +181,7 @@ jobs:
             [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
             [ "${{ needs.changes.outputs.agent }}" = "true" ] && sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
             [ "${{ needs.changes.outputs.frontend }}" = "true" ] && sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
-            docker compose pull
+            docker compose pull --ignore-pull-failures
             docker compose up -d
             docker compose ps
 
@@ -205,6 +205,6 @@ jobs:
             [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
             [ "${{ needs.changes.outputs.agent }}" = "true" ] && sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
             [ "${{ needs.changes.outputs.frontend }}" = "true" ] && sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
-            docker compose pull
+            docker compose pull --ignore-pull-failures
             docker compose up -d
             docker compose ps
