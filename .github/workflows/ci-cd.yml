@@ -128,7 +128,7 @@ jobs:
         run: npm test || echo "no tests yet for frontend"
 
   build-and-push:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+    if: ${{ always() && !failure() && !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') }}
     needs: [changes, test-yolo, scout-yolo, test-img-proc-mcp, test-agent, test-frontend]
     runs-on: ubuntu-latest
     strategy:
@@ -162,7 +162,7 @@ jobs:
           tags: sleemaneketeh/${{ matrix.name }}:${{ github.sha }}
 
   deploy-dev:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    if: ${{ always() && !failure() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
     needs: [changes, build-and-push]
     runs-on: ubuntu-latest
     steps:
@@ -186,7 +186,7 @@ jobs:
             docker compose ps
 
   deploy-prod:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ always() && !failure() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: [changes, build-and-push]
     runs-on: ubuntu-latest
     steps:
