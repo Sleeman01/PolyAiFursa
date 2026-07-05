@@ -135,15 +135,19 @@ jobs:
       matrix:
         include:
           - name: yolo
+            image: yolo-service
             changed: ${{ needs.changes.outputs.yolo }}
             context: services/yolo
           - name: img-proc-mcp
+            image: img-proc-mcp
             changed: ${{ needs.changes.outputs.img_proc_mcp }}
             context: services/img-proc-mcp
           - name: agent
+            image: agent
             changed: ${{ needs.changes.outputs.agent }}
             context: services/agent
           - name: frontend
+            image: frontend
             changed: ${{ needs.changes.outputs.frontend }}
             context: services/frontend
     steps:
@@ -159,7 +163,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           push: true
-          tags: sleemaneketeh/${{ matrix.name }}:${{ github.sha }}
+          tags: sleemaneketeh/${{ matrix.image }}:${{ github.sha }}
 
   deploy-dev:
     if: ${{ always() && !failure() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
