@@ -1,8 +1,5 @@
 name: CI/CD
 
-# Replaces ci.yml and ci-cd.yml. deploy.yaml already removed (systemd, superseded).
-# Assumed layout: services/yolo, services/img-proc-mcp, services/agent, services/frontend
-
 on:
   push:
     branches: [dev, main]
@@ -25,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # paths-filter needs full history to diff against event.before
+          fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -48,8 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -72,20 +68,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to DockerHub
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build image (load locally, no push)
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: services/yolo
           load: true
           push: false
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:scan
-      - name: Scan image with Docker Scout
-        uses: docker/scout-action@v1
+      - uses: docker/scout-action@v1
         with:
           command: cves
           image: ${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:scan
@@ -98,15 +91,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
-        working-directory: services/img-proc-mcp
+      - working-directory: services/img-proc-mcp
         run: pip install -r requirements.txt
-      - name: Run tests
-        working-directory: services/img-proc-mcp
+      - working-directory: services/img-proc-mcp
         run: pytest tests/ -q
 
   test-agent:
@@ -115,15 +105,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
-        working-directory: services/agent
+      - working-directory: services/agent
         run: pip install -r requirements.txt
-      - name: Run tests
-        working-directory: services/agent
+      - working-directory: services/agent
         run: pytest tests/ -q || echo "no tests yet for agent"
 
   test-frontend:
@@ -132,19 +119,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install dependencies
-        working-directory: services/frontend
+      - working-directory: services/frontend
         run: npm ci
-      - name: Run tests
-        working-directory: services/frontend
+      - working-directory: services/frontend
         run: npm test || echo "no tests yet for frontend"
 
   build-and-push:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
     needs: [changes, test-yolo, scout-yolo, test-img-proc-mcp, test-agent, test-frontend]
     runs-on: ubuntu-latest
     strategy:
@@ -165,21 +149,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: matrix.changed == 'true'
-      - name: Log in to DockerHub
+      - uses: docker/login-action@v3
         if: matrix.changed == 'true'
-        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and push (tag = commit SHA)
+      - uses: docker/build-push-action@v6
         if: matrix.changed == 'true'
-        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           push: true
           tags: sleemaneketeh/${{ matrix.name }}:${{ github.sha }}
 
-  deploy:
+  deploy-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: [changes, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy to dev
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/PolyAiFursa
+            git pull origin dev
+            SHA="${{ github.sha }}"
+            [ "${{ needs.changes.outputs.yolo }}" = "true" ] && sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.agent }}" = "true" ] && sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.frontend }}" = "true" ] && sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
+            docker compose pull
+            docker compose up -d
+            docker compose ps
+
+  deploy-prod:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [changes, build-and-push]
     runs-on: ubuntu-latest
@@ -187,24 +193,18 @@ jobs:
       - name: SSH deploy to prod
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_SSH_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
+          host: ${{ secrets.PROD_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
           script: |
             set -e
             cd ~/PolyAiFursa
             git pull origin main
-
             SHA="${{ github.sha }}"
-            [ "${{ needs.changes.outputs.yolo }}" = "true" ] && \
-              sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
-            [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && \
-              sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
-            [ "${{ needs.changes.outputs.agent }}" = "true" ] && \
-              sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
-            [ "${{ needs.changes.outputs.frontend }}" = "true" ] && \
-              sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
-
+            [ "${{ needs.changes.outputs.yolo }}" = "true" ] && sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.img_proc_mcp }}" = "true" ] && sed -i "s/^IMG_PROC_MCP_TAG=.*/IMG_PROC_MCP_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.agent }}" = "true" ] && sed -i "s/^AGENT_TAG=.*/AGENT_TAG=$SHA/" .env
+            [ "${{ needs.changes.outputs.frontend }}" = "true" ] && sed -i "s/^FRONTEND_TAG=.*/FRONTEND_TAG=$SHA/" .env
             docker compose pull
             docker compose up -d
             docker compose ps
