@@ -54,8 +54,12 @@ if MODEL not in ALLOWED_MODELS:
     )
 
 SYSTEM_PROMPT = (
-    "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "You are an AI vision assistant that analyzes and edits uploaded images. "
+    "For whole-image transformations such as blur, rotate, flip, or noise, "
+    "call process_region directly and omit the box argument. "
+    "Use detect_objects or get_detections only when the user asks about objects "
+    "or requests an edit to a specific object or region. "
+    "After process_region succeeds, the task is complete. Do not call more tools."
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
@@ -146,32 +150,44 @@ async def _apply_mcp_transform(tool_name: str, region_b64: str, params: dict) ->
     # MCP tool results may come back as a plain string, or as a list of
     # content blocks (dicts / objects with a .text). Normalise to a string.
     def _extract_text(r):
+        if r is None:
+            return ""
+
         if isinstance(r, str):
             return r
-        if isinstance(r, list):
-            parts = []
-            for block in r:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict):
-                    parts.append(block.get("text", ""))
-                elif hasattr(block, "text"):
-                    parts.append(block.text)
-            return "".join(parts)
+
+        # LangChain messages commonly store tool output in .content.
+        if hasattr(r, "content"):
+            return _extract_text(r.content)
+
+        if isinstance(r, (list, tuple)):
+            return "".join(_extract_text(block) for block in r)
+
         if isinstance(r, dict):
-            return r.get("text", "")
+            if "text" in r:
+                return _extract_text(r["text"])
+            if "content" in r:
+                return _extract_text(r["content"])
+
         if hasattr(r, "text"):
-            return r.text
+            return _extract_text(r.text)
+
         return str(r)
 
-    return _extract_text(result)
+    transformed = _extract_text(result).strip()
+
+    # Support base64 data URLs if a tool ever returns one.
+    if transformed.startswith("data:image/") and "," in transformed:
+        transformed = transformed.split(",", 1)[1]
+
+    return transformed
 
 
 @tool
-async def process_region(tool_name: str, box: list, blur_radius: float = 3.0, angle: float = 90.0, direction: str = "horizontal") -> str:
+async def process_region(tool_name: str, box: list | str | None = None, blur_radius: float = 3.0, angle: float = 90.0, direction: str = "horizontal") -> str:
     """Apply an image transformation to a specific region of the user's image and composite it back.
     - tool_name: one of "blur", "rotate", "flip", "add_noise"
-    - box: [x1, y1, x2, y2] pixel coordinates of the region (from get_detections)
+    - box: optional [x1, y1, x2, y2] coordinates; omit it to process the entire image
     - blur_radius: used when tool_name is "blur" (default 3.0)
     - angle: used when tool_name is "rotate" (default 90)
     - direction: used when tool_name is "flip", either "horizontal" or "vertical"
@@ -192,16 +208,38 @@ async def process_region(tool_name: str, box: list, blur_radius: float = 3.0, an
 
     from PIL import Image
 
-    # box may arrive as a real list, or as a string like "[145, 88, 210, 300]"
-    if isinstance(box, str):
-        import ast as _ast
-        try:
-            box = _ast.literal_eval(box)
-        except Exception:
-            box = [float(x) for x in box.strip("[]() ").split(",")]
-
     full = Image.open(io.BytesIO(_b64.b64decode(image_b64))).convert("RGB")
-    x1, y1, x2, y2 = [int(float(v)) for v in box]
+
+    # No box means apply the transformation to the entire image.
+    if box is None:
+        x1, y1 = 0, 0
+        x2, y2 = full.size
+    else:
+        # box may arrive as a list or as a string like "[145, 88, 210, 300]"
+        if isinstance(box, str):
+            import ast as _ast
+            try:
+                box = _ast.literal_eval(box)
+            except Exception:
+                box = [float(x) for x in box.strip("[]() ").split(",")]
+
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return json.dumps({
+                "error": "box must contain four values: [x1, y1, x2, y2]"
+            })
+
+        x1, y1, x2, y2 = [int(float(v)) for v in box]
+
+        # Keep the region inside the image boundaries.
+        width, height = full.size
+        x1 = max(0, min(x1, width))
+        x2 = max(0, min(x2, width))
+        y1 = max(0, min(y1, height))
+        y2 = max(0, min(y2, height))
+
+        if x2 <= x1 or y2 <= y1:
+            return json.dumps({"error": "The provided box is invalid."})
+
     region = full.crop((x1, y1, x2, y2))
 
     buf = io.BytesIO()
@@ -238,7 +276,10 @@ def _load_mcp_tools():
         return []
 
 _mcp_tools = _load_mcp_tools()
-_all_tools = _LOCAL_TOOLS + _mcp_tools
+
+# MCP tools are used internally by process_region.
+# Do not expose the low-level tools directly to the language model.
+_all_tools = _LOCAL_TOOLS
 
 # Registry: map tool name -> tool object (for execution in the loop)
 TOOLS = {t.name: t for t in _all_tools}
@@ -278,9 +319,22 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
 
         # Execute every tool the model requested (ainvoke works for both sync and async tools)
         for tool_call in response.tool_calls:
-            tool_fn = TOOLS[tool_call["name"]]
-            tool_result = await tool_fn.ainvoke(tool_call)   # returns a ToolMessage
+            tool_name = tool_call["name"]
+            tool_fn = TOOLS.get(tool_name)
+
+            if tool_fn is None:
+                return f"Tool {tool_name} is not available."
+
+            tool_result = await tool_fn.ainvoke(tool_call)
             messages.append(tool_result)
+
+            # The edited image is already stored for the /chat response.
+            # Do not ask the model to perform more unnecessary steps.
+            if (
+                tool_name == "process_region"
+                and _prediction_holder.get("result_image_b64")
+            ):
+                return "Done — I applied the requested image transformation."
 
     # Hit the iteration cap without a final answer
     return "Sorry, I couldn't complete the request within the allowed number of steps."

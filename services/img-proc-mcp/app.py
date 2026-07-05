@@ -3,9 +3,21 @@ import io
 import random
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from PIL import Image, ImageFilter
 
-mcp = FastMCP("img-proc")
+mcp = FastMCP(
+    "img-proc",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "img-proc-mcp:*",
+            "localhost:*",
+            "127.0.0.1:*",
+        ],
+        allowed_origins=[],
+    ),
+)
 
 
 def _decode(b64: str) -> Image.Image:
