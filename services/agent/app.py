@@ -19,6 +19,8 @@ logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 
 import httpx
+import asyncio
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
@@ -27,6 +29,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
+MCP_SERVICE_URL = os.environ.get("MCP_SERVICE_URL", "http://localhost:9000/mcp")
 MODEL = os.environ.get("MODEL")
 
 # S3 configuration from environment variables (never hard-code)
@@ -51,8 +54,12 @@ if MODEL not in ALLOWED_MODELS:
     )
 
 SYSTEM_PROMPT = (
-    "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "You are an AI vision assistant that analyzes and edits uploaded images. "
+    "For whole-image transformations such as blur, rotate, flip, or noise, "
+    "call process_region directly and omit the box argument. "
+    "Use detect_objects or get_detections only when the user asks about objects "
+    "or requests an edit to a specific object or region. "
+    "After process_region succeeds, the task is complete. Do not call more tools."
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
@@ -91,10 +98,192 @@ def detect_objects() -> str:
     return json.dumps(data)
 
 
-# Registry: map tool name -> tool function
-TOOLS = {
-    detect_objects.name: detect_objects
-}
+@tool
+def get_detections() -> str:
+    """Return the list of detected objects (labels and bounding boxes) for the user's current image,
+    using YOLO. Each detection has: index, label, and box [x1, y1, x2, y2] in pixel coordinates.
+    Call this before doing object-specific edits so you know where each object is."""
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+    if not AWS_S3_BUCKET:
+        return json.dumps({"error": "AWS_S3_BUCKET env var is not set."})
+
+    image_bytes = base64.b64decode(image_b64)
+    chat_id = _current_chat_id.get() or "unknown-chat"
+    prediction_id = str(uuid.uuid4())
+    original_key = f"{chat_id}/{prediction_id}/original/image.jpg"
+    s3_client.upload_fileobj(io.BytesIO(image_bytes), AWS_S3_BUCKET, original_key)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(f"{YOLO_SERVICE_URL}/predict", json={"image_s3_key": original_key})
+        response.raise_for_status()
+    data = response.json()
+    uid = data.get("prediction_uid")
+    if uid:
+        _prediction_holder["uid"] = uid
+
+    detections = []
+    if uid:
+        with httpx.Client(timeout=30.0) as client:
+            det = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}")
+            if det.status_code == 200:
+                objs = det.json().get("detection_objects", [])
+                for i, o in enumerate(objs):
+                    detections.append({"index": i, "label": o.get("label"), "box": o.get("box")})
+    return json.dumps({"detections": detections})
+
+
+async def _apply_mcp_transform(tool_name: str, region_b64: str, params: dict) -> str:
+    """Call a single MCP image tool by name on a base64 region, return transformed base64."""
+    client = MultiServerMCPClient({
+        "img-proc": {"url": MCP_SERVICE_URL, "transport": "streamable_http"}
+    })
+    tools = await client.get_tools()
+    tool_map = {t.name: t for t in tools}
+    if tool_name not in tool_map:
+        raise ValueError(f"Unknown image tool: {tool_name}")
+    args = {"image_b64": region_b64}
+    args.update(params)
+    result = await tool_map[tool_name].ainvoke(args)
+
+    # MCP tool results may come back as a plain string, or as a list of
+    # content blocks (dicts / objects with a .text). Normalise to a string.
+    def _extract_text(r):
+        if r is None:
+            return ""
+
+        if isinstance(r, str):
+            return r
+
+        # LangChain messages commonly store tool output in .content.
+        if hasattr(r, "content"):
+            return _extract_text(r.content)
+
+        if isinstance(r, (list, tuple)):
+            return "".join(_extract_text(block) for block in r)
+
+        if isinstance(r, dict):
+            if "text" in r:
+                return _extract_text(r["text"])
+            if "content" in r:
+                return _extract_text(r["content"])
+
+        if hasattr(r, "text"):
+            return _extract_text(r.text)
+
+        return str(r)
+
+    transformed = _extract_text(result).strip()
+
+    # Support base64 data URLs if a tool ever returns one.
+    if transformed.startswith("data:image/") and "," in transformed:
+        transformed = transformed.split(",", 1)[1]
+
+    return transformed
+
+
+@tool
+async def process_region(tool_name: str, box: list | str | None = None, blur_radius: float = 3.0, angle: float = 90.0, direction: str = "horizontal") -> str:
+    """Apply an image transformation to a specific region of the user's image and composite it back.
+    - tool_name: one of "blur", "rotate", "flip", "add_noise"
+    - box: optional [x1, y1, x2, y2] coordinates; omit it to process the entire image
+    - blur_radius: used when tool_name is "blur" (default 3.0)
+    - angle: used when tool_name is "rotate" (default 90)
+    - direction: used when tool_name is "flip", either "horizontal" or "vertical"
+    Returns a short status; the edited image is sent back to the user automatically."""
+    import base64 as _b64
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+    # Build params for the chosen tool
+    if tool_name == "blur":
+        params = {"radius": blur_radius}
+    elif tool_name == "rotate":
+        params = {"angle": angle}
+    elif tool_name == "flip":
+        params = {"direction": direction}
+    else:
+        params = {}
+
+    from PIL import Image
+
+    full = Image.open(io.BytesIO(_b64.b64decode(image_b64))).convert("RGB")
+
+    # No box means apply the transformation to the entire image.
+    if box is None:
+        x1, y1 = 0, 0
+        x2, y2 = full.size
+    else:
+        # box may arrive as a list or as a string like "[145, 88, 210, 300]"
+        if isinstance(box, str):
+            import ast as _ast
+            try:
+                box = _ast.literal_eval(box)
+            except Exception:
+                box = [float(x) for x in box.strip("[]() ").split(",")]
+
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return json.dumps({
+                "error": "box must contain four values: [x1, y1, x2, y2]"
+            })
+
+        x1, y1, x2, y2 = [int(float(v)) for v in box]
+
+        # Keep the region inside the image boundaries.
+        width, height = full.size
+        x1 = max(0, min(x1, width))
+        x2 = max(0, min(x2, width))
+        y1 = max(0, min(y1, height))
+        y2 = max(0, min(y2, height))
+
+        if x2 <= x1 or y2 <= y1:
+            return json.dumps({"error": "The provided box is invalid."})
+
+    region = full.crop((x1, y1, x2, y2))
+
+    buf = io.BytesIO()
+    region.save(buf, format="PNG")
+    region_b64 = _b64.b64encode(buf.getvalue()).decode()
+
+    transformed_b64 = await _apply_mcp_transform(tool_name, region_b64, params)
+    transformed = Image.open(io.BytesIO(_b64.b64decode(transformed_b64))).convert("RGB")
+
+    transformed = transformed.resize((x2 - x1, y2 - y1))
+    full.paste(transformed, (x1, y1))
+
+    out = io.BytesIO()
+    full.save(out, format="PNG")
+    result_b64 = _b64.b64encode(out.getvalue()).decode()
+    _prediction_holder["result_image_b64"] = result_b64
+    # Do NOT return the base64 image to the LLM (it blows the token limit).
+    # The image is stored and returned to the user by the /chat handler.
+    return json.dumps({"status": "ok", "message": f"Applied {tool_name} to the region and produced the edited image."})
+
+
+# Local tools the agent always has
+_LOCAL_TOOLS = [detect_objects, get_detections, process_region]
+
+# Load the image-processing tools from the MCP server once at startup
+def _load_mcp_tools():
+    try:
+        client = MultiServerMCPClient({
+            "img-proc": {"url": MCP_SERVICE_URL, "transport": "streamable_http"}
+        })
+        return asyncio.run(client.get_tools())
+    except Exception as e:
+        logging.warning(f"Could not load MCP tools from {MCP_SERVICE_URL}: {e}")
+        return []
+
+_mcp_tools = _load_mcp_tools()
+
+# MCP tools are used internally by process_region.
+# Do not expose the low-level tools directly to the language model.
+_all_tools = _LOCAL_TOOLS
+
+# Registry: map tool name -> tool object (for execution in the loop)
+TOOLS = {t.name: t for t in _all_tools}
+logging.info(f"Agent tools available: {list(TOOLS.keys())}")
 
 _rate_limiter = InMemoryRateLimiter(
     requests_per_second=0.16,
@@ -103,11 +292,11 @@ _rate_limiter = InMemoryRateLimiter(
 )
 
 llm = init_chat_model(MODEL, temperature=0, rate_limiter=_rate_limiter)
-llm_with_tools = llm.bind_tools(list(TOOLS.values()))
+llm_with_tools = llm.bind_tools(_all_tools)
 
-def run_agent(history: list, max_iterations: int = 10) -> str:
+async def run_agent(history: list, max_iterations: int = 10) -> str:
     """
-    Simple ReAct loop:
+    Simple ReAct loop (async, so it can call async MCP tools):
       1. Send messages to the LLM.
       2. If the LLM requests tool calls, execute them and append results.
       3. Repeat until the LLM returns a plain text response.
@@ -115,7 +304,7 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
 
     for _ in range(max_iterations):
-        response: AIMessage = llm_with_tools.invoke(messages)
+        response: AIMessage = await llm_with_tools.ainvoke(messages)
         messages.append(response)
 
         # No tool calls, the model produced its final answer
@@ -128,11 +317,24 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
                 )
             return content
 
-        # Execute every tool the model requested
+        # Execute every tool the model requested (ainvoke works for both sync and async tools)
         for tool_call in response.tool_calls:
-            tool_fn = TOOLS[tool_call["name"]]
-            tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
+            tool_name = tool_call["name"]
+            tool_fn = TOOLS.get(tool_name)
+
+            if tool_fn is None:
+                return f"Tool {tool_name} is not available."
+
+            tool_result = await tool_fn.ainvoke(tool_call)
             messages.append(tool_result)
+
+            # The edited image is already stored for the /chat response.
+            # Do not ask the model to perform more unnecessary steps.
+            if (
+                tool_name == "process_region"
+                and _prediction_holder.get("result_image_b64")
+            ):
+                return "Done — I applied the requested image transformation."
 
     # Hit the iteration cap without a final answer
     return "Sorry, I couldn't complete the request within the allowed number of steps."
@@ -169,7 +371,7 @@ class ChatResponse(BaseModel):
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+async def chat(request: ChatRequest):
     lc_messages = []
     latest_image = None
 
@@ -188,18 +390,24 @@ def chat(request: ChatRequest):
     token = _current_image_b64.set(latest_image)
     chat_token = _current_chat_id.set(chat_id)
     _prediction_holder.pop("uid", None)
+    _prediction_holder.pop("result_image_b64", None)
     try:
-        answer = run_agent(lc_messages)
+        answer = await run_agent(lc_messages)
         annotated = None
-        uid = _prediction_holder.get("uid")
-        if uid:
-            try:
-                with httpx.Client(timeout=30.0) as client:
-                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
-                    img_resp.raise_for_status()
-                annotated = base64.b64encode(img_resp.content).decode("utf-8")
-            except Exception:
-                annotated = None
+        # If an image edit (process_region) produced a result, return that.
+        edited = _prediction_holder.get("result_image_b64")
+        if edited:
+            annotated = edited
+        else:
+            uid = _prediction_holder.get("uid")
+            if uid:
+                try:
+                    with httpx.Client(timeout=30.0) as client:
+                        img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                        img_resp.raise_for_status()
+                    annotated = base64.b64encode(img_resp.content).decode("utf-8")
+                except Exception:
+                    annotated = None
         return ChatResponse(response=answer, annotated_image_base64=annotated)
     finally:
         _current_image_b64.reset(token)
@@ -216,3 +424,5 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+# t004 pipeline test - trivial change to trigger agent-only build
+# pipeline test 2

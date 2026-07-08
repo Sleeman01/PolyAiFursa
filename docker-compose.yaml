@@ -1,0 +1,87 @@
+services:
+  yolo:
+    image: sleemaneketeh/yolo-service:${YOLO_TAG:-latest}
+    build: ./services/yolo
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+    ports:
+      - "8080:8080"
+    networks:
+      - polyai-net
+
+  img-proc-mcp:
+    image: sleemaneketeh/img-proc-mcp:${IMG_PROC_MCP_TAG:-latest}
+    build: ./services/img-proc-mcp
+    environment:
+      - MCP_PORT=9000
+    networks:
+      - polyai-net
+
+  agent:
+    image: sleemaneketeh/agent:${AGENT_TAG:-latest}
+    build: ./services/agent
+    environment:
+      - YOLO_SERVICE_URL=http://yolo:8080
+      - MCP_SERVICE_URL=http://img-proc-mcp:9000/mcp
+      - MODEL=${MODEL:-bedrock_converse:amazon.nova-lite-v1:0}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+    ports:
+      - "8000:8000"
+    networks:
+      - polyai-net
+    depends_on:
+      - yolo
+      - img-proc-mcp
+
+  frontend:
+    image: sleemaneketeh/frontend:${FRONTEND_TAG:-latest}
+    build: ./services/frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - polyai-net
+    depends_on:
+      - agent
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - polyai-net
+      - monitoring-net
+    depends_on:
+      - yolo
+      - node-exporter
+
+  node-exporter:
+    image: prom/node-exporter
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring-net
+      - polyai-net
+
+  grafana:
+    image: grafana/grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    networks:
+      - monitoring-net
+    depends_on:
+      - prometheus
+
+networks:
+  polyai-net:
+  monitoring-net:
+
+volumes:
+  prometheus-data:
+  grafana-data:

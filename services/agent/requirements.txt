@@ -14,3 +14,6 @@ pydantic
 boto3
 
 langchain-aws
+pillow
+langchain-mcp-adapters
+pytest
