@@ -12,6 +12,7 @@ mcp = FastMCP(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[
             "img-proc-mcp:*",
+            "img-proc-mcp-svc:*",
             "localhost:*",
             "127.0.0.1:*",
         ],
