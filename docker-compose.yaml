@@ -27,6 +27,7 @@ services:
       - MODEL=${MODEL:-bedrock_converse:amazon.nova-lite-v1:0}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - CORS_ALLOW_ORIGINS=http://sleeman01-dev.fursa.click:3000,http://localhost:3000
     ports:
       - "8000:8000"
     networks:
@@ -37,7 +38,10 @@ services:
 
   frontend:
     image: sleemaneketeh/frontend:${FRONTEND_TAG:-latest}
-    build: ./services/frontend
+    build:
+      context: ./services/frontend
+      args:
+        NEXT_PUBLIC_AGENT_URL: ${AGENT_PUBLIC_URL}
     ports:
       - "3000:3000"
     networks:
