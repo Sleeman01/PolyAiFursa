@@ -1,0 +1,13 @@
+{
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "sleeman01-dev.fursa.click",
+        "Type": "A",
+        "TTL": 300,
+        "ResourceRecords": [{ "Value": "3.224.184.71" }]
+      }
+    }
+  ]
+}
