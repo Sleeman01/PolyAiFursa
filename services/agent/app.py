@@ -44,6 +44,7 @@ ALLOWED_MODELS = {
     "google_genai:gemini-2.5-flash",
     "google_genai:gemini-2.5-flash-lite",
     "bedrock_converse:amazon.nova-lite-v1:0",
+    "bedrock_converse:us.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -55,16 +56,65 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant that analyzes and edits uploaded images. "
+    "Every user message describing a new edit (blur, rotate, flip, noise) is a "
+    "NEW request that requires a NEW call to process_region — even if a previous "
+    "turn already did something similar. Never respond with confirmation text "
+    "without first calling the appropriate tool for the CURRENT message. "
     "For whole-image transformations such as blur, rotate, flip, or noise, "
     "call process_region directly and omit the box argument. "
     "Use detect_objects or get_detections only when the user asks about objects "
     "or requests an edit to a specific object or region. "
-    "After process_region succeeds, the task is complete. Do not call more tools."
+    "When the user refers to an object by position (e.g. 'leftmost', 'middle', "
+    "'second dog', 'the one on the right'), you MUST match their wording against "
+    "the 'position' field already computed and returned by get_detections — do "
+    "NOT estimate position yourself from the raw box coordinates, the "
+    "pre-computed 'position' field is authoritative and correct. "
+    "If the user asks to see, view, or show the current image, or says they "
+    "don't see an image, call show_current_image — do not just claim you've "
+    "shown it in text. "
+    "After process_region or show_current_image succeeds for THIS message, the "
+    "task is complete. Do not call more tools."
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
 _current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", default=None)
-_prediction_holder: dict = {}
+
+# Per-request prediction/result state. This used to be a plain module-level dict,
+# which is shared by every concurrent request on this process -- if two /chat
+# calls overlapped (e.g. a double-submit), one request's cleanup could wipe out
+# another in-flight request's result right before it was read. A ContextVar
+# gives each request (each asyncio task) its own isolated dict instead.
+_prediction_holder_var: ContextVar[Optional[dict]] = ContextVar("prediction_holder", default=None)
+
+
+def _get_holder() -> dict:
+    """Get this request's prediction holder dict, creating one if it doesn't exist yet."""
+    holder = _prediction_holder_var.get()
+    if holder is None:
+        holder = {}
+        _prediction_holder_var.set(holder)
+    return holder
+
+
+def _parse_box(box_val):
+    """Yolo returns 'box' as a JSON-encoded STRING like '[x1, y1, x2, y2]',
+    not an actual list. Sorting/indexing that string directly (e.g. box[0])
+    grabs a character, not a number -- which was the root cause of the
+    left/middle/right object-selection bug. Parse it into a real list here
+    so every downstream consumer (sorting, process_region, the model) gets
+    genuine numbers."""
+    if isinstance(box_val, str):
+        try:
+            box_val = json.loads(box_val)
+        except Exception:
+            import ast as _ast
+            try:
+                box_val = _ast.literal_eval(box_val)
+            except Exception:
+                return None
+    return box_val
+
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -94,7 +144,7 @@ def detect_objects() -> str:
         response.raise_for_status()
     data = response.json()
     if data.get("prediction_uid"):
-        _prediction_holder["uid"] = data["prediction_uid"]
+        _get_holder()["uid"] = data["prediction_uid"]
     return json.dumps(data)
 
 
@@ -121,7 +171,7 @@ def get_detections() -> str:
     data = response.json()
     uid = data.get("prediction_uid")
     if uid:
-        _prediction_holder["uid"] = uid
+        _get_holder()["uid"] = uid
 
     detections = []
     if uid:
@@ -129,8 +179,23 @@ def get_detections() -> str:
             det = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}")
             if det.status_code == 200:
                 objs = det.json().get("detection_objects", [])
-                for i, o in enumerate(objs):
-                    detections.append({"index": i, "label": o.get("label"), "box": o.get("box")})
+                logging.info(f"RAW YOLO DETECTIONS: {json.dumps(objs)}")
+                # Sort left-to-right by the box's left edge (x1) so position labels are reliable.
+                # _parse_box handles Yolo returning box as a JSON-encoded string.
+                objs_sorted = sorted(objs, key=lambda o: (_parse_box(o.get("box")) or [0])[0])
+                n = len(objs_sorted)
+                for i, o in enumerate(objs_sorted):
+                    if n == 1:
+                        position = "only"
+                    elif i == 0:
+                        position = "leftmost"
+                    elif i == n - 1:
+                        position = "rightmost"
+                    elif n == 3 and i == 1:
+                        position = "middle"
+                    else:
+                        position = f"position {i+1} from the left"
+                    detections.append({"index": i, "label": o.get("label"), "box": _parse_box(o.get("box")), "position": position})
     return json.dumps({"detections": detections})
 
 
@@ -189,7 +254,11 @@ async def process_region(tool_name: str, box: list | str | None = None, blur_rad
     - tool_name: one of "blur", "rotate", "flip", "add_noise"
     - box: optional [x1, y1, x2, y2] coordinates; omit it to process the entire image
     - blur_radius: used when tool_name is "blur" (default 3.0)
-    - angle: used when tool_name is "rotate" (default 90)
+    - angle: used when tool_name is "rotate". Positive angle = counter-clockwise
+      ("rotate left"), negative angle = clockwise ("rotate right"). For example,
+      "rotate 90 degrees left" means angle=90, and "rotate 90 degrees right" means
+      angle=-90. To undo a previous rotation, use the exact opposite sign of the
+      angle that was originally applied.
     - direction: used when tool_name is "flip", either "horizontal" or "vertical"
     Returns a short status; the edited image is sent back to the user automatically."""
     import base64 as _b64
@@ -249,20 +318,40 @@ async def process_region(tool_name: str, box: list | str | None = None, blur_rad
     transformed_b64 = await _apply_mcp_transform(tool_name, region_b64, params)
     transformed = Image.open(io.BytesIO(_b64.b64decode(transformed_b64))).convert("RGB")
 
-    transformed = transformed.resize((x2 - x1, y2 - y1))
-    full.paste(transformed, (x1, y1))
+    if box is None:
+        # Whole-image edit: the transformed image IS the new full image.
+        # Don't force it back into the old (pre-rotation) canvas size --
+        # that's what was squashing/distorting every whole-image rotate.
+        full = transformed
+    else:
+        # Region edit: the surrounding canvas must stay the same size,
+        # so resize the transformed region back to fit exactly where it came from.
+        transformed = transformed.resize((x2 - x1, y2 - y1))
+        full.paste(transformed, (x1, y1))
 
     out = io.BytesIO()
     full.save(out, format="PNG")
     result_b64 = _b64.b64encode(out.getvalue()).decode()
-    _prediction_holder["result_image_b64"] = result_b64
+    _get_holder()["result_image_b64"] = result_b64
     # Do NOT return the base64 image to the LLM (it blows the token limit).
     # The image is stored and returned to the user by the /chat handler.
     return json.dumps({"status": "ok", "message": f"Applied {tool_name} to the region and produced the edited image."})
 
+@tool
+def show_current_image() -> str:
+    """Return the user's current image as-is, with no transformation applied.
+    Call this when the user asks to see, view, or show the current image
+    (e.g. "show me the image", "I don't see it", "can I see the result")
+    rather than requesting a new edit."""
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+    _get_holder()["result_image_b64"] = image_b64
+    return json.dumps({"status": "ok", "message": "Displaying the current image."})
+
 
 # Local tools the agent always has
-_LOCAL_TOOLS = [detect_objects, get_detections, process_region]
+_LOCAL_TOOLS = [detect_objects, get_detections, process_region, show_current_image]
 
 # Load the image-processing tools from the MCP server once at startup
 def _load_mcp_tools():
@@ -302,6 +391,8 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
       3. Repeat until the LLM returns a plain text response.
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
+    nudge_count = 0
+    max_nudges = 2
 
     for _ in range(max_iterations):
         response: AIMessage = await llm_with_tools.ainvoke(messages)
@@ -315,6 +406,22 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
                     part.get("text", "") if isinstance(part, dict) else str(part)
                     for part in content
                 )
+            if nudge_count < max_nudges:
+                # Known failure mode: a small model, deep in a repetitive
+                # conversation, sometimes just repeats a prior confirmation
+                # phrase in plain text instead of actually calling a tool.
+                # Give it an explicit corrective nudge before accepting
+                # a tool-less answer.
+                nudge_count += 1
+                messages.append(AIMessage(content=content))
+                messages.append(HumanMessage(content=(
+                    "You responded without calling any tool. If the previous "
+                    "user message requested an image edit (blur, rotate, flip, "
+                    "noise) or asked to see/view the image, you must call "
+                    "process_region or show_current_image now instead of just "
+                    "repeating a confirmation in text."
+                )))
+                continue
             return content
 
         # Execute every tool the model requested (ainvoke works for both sync and async tools)
@@ -331,10 +438,10 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
             # The edited image is already stored for the /chat response.
             # Do not ask the model to perform more unnecessary steps.
             if (
-                tool_name == "process_region"
-                and _prediction_holder.get("result_image_b64")
+                tool_name in ("process_region", "show_current_image")
+                and _get_holder().get("result_image_b64")
             ):
-                return "Done — I applied the requested image transformation."
+                return "Here you go."
 
     # Hit the iteration cap without a final answer
     return "Sorry, I couldn't complete the request within the allowed number of steps."
@@ -389,17 +496,20 @@ async def chat(request: ChatRequest):
     chat_id = str(uuid.uuid4())
     token = _current_image_b64.set(latest_image)
     chat_token = _current_chat_id.set(chat_id)
-    _prediction_holder.pop("uid", None)
-    _prediction_holder.pop("result_image_b64", None)
+    # Give this request its own fresh, isolated prediction holder -- this is what
+    # actually fixes the race: even if another request is in flight concurrently,
+    # it has its own separate dict via its own ContextVar token, so neither can
+    # clobber the other's result.
+    holder_token = _prediction_holder_var.set({})
     try:
         answer = await run_agent(lc_messages)
         annotated = None
         # If an image edit (process_region) produced a result, return that.
-        edited = _prediction_holder.get("result_image_b64")
+        edited = _get_holder().get("result_image_b64")
         if edited:
             annotated = edited
         else:
-            uid = _prediction_holder.get("uid")
+            uid = _get_holder().get("uid")
             if uid:
                 try:
                     with httpx.Client(timeout=30.0) as client:
@@ -412,7 +522,7 @@ async def chat(request: ChatRequest):
     finally:
         _current_image_b64.reset(token)
         _current_chat_id.reset(chat_token)
-        _prediction_holder.pop("uid", None)
+        _prediction_holder_var.reset(holder_token)
 
 
 @app.get("/health")

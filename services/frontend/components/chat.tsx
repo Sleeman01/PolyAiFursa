@@ -1,66 +1,75 @@
 "use client";
-
+ 
 import { useState, useRef, useEffect } from "react";
 import { SendHorizontal, ImagePlus, X } from "lucide-react";
 import { toast } from "sonner";
 import { sendMessage } from "@/lib/api";
 import type { ChatMessage } from "@/lib/types";
 import MessageBubble from "./message-bubble";
-
+ 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [imageB64, setImageB64] = useState<string | null>(null);
+  const [currentImageB64, setCurrentImageB64] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
+ 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-
+ 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
-
+ 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
-      setImageB64(result.split(",")[1]);
+      const b64 = result.split(",")[1];
+      setImageB64(b64);
+      setCurrentImageB64(b64); // starting fresh with a newly picked image
       setImagePreview(result);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
   }
-
+ 
   function handleTextareaChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
     e.target.style.height = "auto";
     e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
   }
-
+ 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!input.trim() && !imageB64) return;
-
+    if (loading) return; // guard against double-submit
+    if (!input.trim() && !currentImageB64) return;
+ 
     const userMessage: ChatMessage = {
       role: "user",
       content: input.trim() || "What's in this image?",
-      ...(imageB64 ? { image_base64: imageB64 } : {}),
+      ...(currentImageB64 ? { image_base64: currentImageB64 } : {}),
     };
-
+ 
     const next = [...messages, userMessage];
     setMessages(next);
     setInput("");
     setImageB64(null);
     setImagePreview(null);
+    // note: currentImageB64 is intentionally NOT cleared here — it must
+    // persist across turns so edits chain onto the latest image, not the original.
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setLoading(true);
-
+ 
     try {
       const reply = await sendMessage(next);
+      if (reply.annotated_image_base64) {
+        setCurrentImageB64(reply.annotated_image_base64); // chain future edits onto this result
+      }
       setMessages([...next, {
         role: "assistant",
         content: reply.response,
@@ -74,14 +83,15 @@ export default function Chat() {
       setLoading(false);
     }
   }
-
+ 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (loading) return; // guard: Enter must not bypass the in-flight-request lock
       handleSubmit(e as unknown as React.FormEvent);
     }
   }
-
+ 
   return (
     <div className="flex flex-col h-screen max-w-3xl mx-auto">
       {/* Header */}
@@ -91,7 +101,7 @@ export default function Chat() {
           <h1 className="text-lg font-semibold tracking-tight">Vision Agent</h1>
         </div>
       </div>
-
+ 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
         {messages.length === 0 && (
@@ -115,7 +125,7 @@ export default function Chat() {
         )}
         <div ref={bottomRef} />
       </div>
-
+ 
       {/* Input */}
       <div className="border-t px-6 py-4 shrink-0">
         {imagePreview && (
@@ -163,7 +173,7 @@ export default function Chat() {
           />
           <button
             type="submit"
-            disabled={loading || (!input.trim() && !imageB64)}
+            disabled={loading || (!input.trim() && !currentImageB64)}
             className="p-2.5 rounded-xl bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm shrink-0"
           >
             <SendHorizontal className="w-5 h-5" />
