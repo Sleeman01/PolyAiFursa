@@ -1,0 +1,89 @@
+{\rtf1\ansi\deff0
+{\fonttbl{\f0 Arial;}}
+{\colortbl;\red0\green0\blue0;}
+\viewkind4\uc1\pard\sa200\sl276\slmult1\f0\fs24
+\b YOLO Service SQLAlchemy Refactor Documentation\b0\par
+\par
+\b 1. Introduction\b0\par
+This document explains the SQLAlchemy refactor done in the YOLO service, why it was useful, what changed in the code, and how skills and evals work in this project.\par
+\par
+\b 2. Why SQLAlchemy is better than using SQLite directly\b0\par
+SQLite is a simple embedded database that is good for small projects and local development. SQLAlchemy provides a more structured and scalable way to work with databases.\par
+\par
+\b Benefits of SQLAlchemy\b0\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet SQLAlchemy uses object-relational mapping (ORM), so database tables are represented as Python classes.\par
+\bullet The code becomes cleaner because developers work with Python objects instead of writing many raw SQL queries.\par
+\bullet It is easier to maintain because database logic is separated from API logic.\par
+\bullet The same code can work with SQLite for development and PostgreSQL for production.\par
+\bullet It reduces manual SQL string errors and makes queries more reusable.\par
+\bullet Future extensions such as new tables or columns are easier to add.\par
+\pard\sa200\sl276\slmult1
+\par
+\b SQLite limitations\b0\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet Raw SQL is often scattered through the application code.\par
+\bullet It becomes harder to maintain in larger systems.\par
+\bullet Switching databases later is more difficult.\par
+\bullet Connections and queries require more manual handling.\par
+\pard\sa200\sl276\slmult1
+\par
+\b 3. What changed in the YOLO project\b0\par
+The YOLO service was refactored so that the database layer is handled in a cleaner and more professional way.\par
+\par
+\b Before\b0\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet The application used raw SQLite logic directly inside the API service.\par
+\bullet Database operations were mixed with request handling.\par
+\bullet The code was less structured.\par
+\pard\sa200\sl276\slmult1
+\par
+\b After\b0\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet The database model was moved into SQLAlchemy model classes.\par
+\bullet Database sessions were created in a dedicated database module.\par
+\bullet FastAPI endpoints now use dependency injection to access the DB session.\par
+\bullet The public API behavior stayed the same.\par
+\pard\sa200\sl276\slmult1
+\par
+\b 4. Main files changed\b0\par
+\b services/yolo/models.py\b0\par
+This file defines the database tables as Python classes.\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet PredictionSession stores information about each prediction request.\par
+\bullet DetectionObject stores each detected object from the prediction result.\par
+\pard\sa200\sl276\slmult1
+\par
+\b services/yolo/db.py\b0\par
+This file handles database engine creation, session creation, initialization, and backend selection between SQLite and PostgreSQL.\par
+\par
+\b services/yolo/app.py\b0\par
+The API endpoints were updated to use SQLAlchemy instead of manual SQL statements.\par
+\pard\li720\fi-720\tx720\sa120\sl276\slmult1
+\bullet Data is inserted using ORM objects.\par
+\bullet Data is queried using ORM filters.\par
+\bullet The API behavior remains the same.\par
+\pard\sa200\sl276\slmult1
+\par
+\b 5. What the refactor achieved\b0\par
+The refactor improved the project by separating database logic from business logic, making the code easier to read, and allowing easier future maintenance and database switching.\par
+\par
+\b 6. What is a skill?\b0\par
+A skill is a reusable instruction file that tells an AI coding agent how to perform a specific task correctly.\par
+In this project, the skill is stored in the .agents/skills/data-layer/SKILL.md file.\par
+\par
+\b Purpose of the skill\b0\par
+The skill explains when to use the data layer approach, what files to modify, what patterns to follow, what to avoid, and how to preserve existing behavior.\par
+\par
+\b 7. What are evals?\b0\par
+Evals are evaluation cases used to test whether a skill works properly. They are stored in the .agents/skills/data-layer/evals/evals.json file.\par
+\par
+\b Why evals are important\b0\par
+They help ensure that the skill gives the correct guidance, the agent changes the right files, and the implementation follows the expected pattern.\par
+\par
+\b 8. How skills and evals work together\b0\par
+The skill provides instructions for the agent, while the evals check whether the agent followed those instructions correctly. Together, they make the agent more reliable and consistent.\par
+\par
+\b 9. Summary\b0\par
+This assignment showed how to modernize a backend service by moving from direct SQLite handling to SQLAlchemy ORM. The result is a cleaner, more maintainable, and more scalable architecture. Skills and evals help future agents perform similar tasks more reliably.\par
+}
