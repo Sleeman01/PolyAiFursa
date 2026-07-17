@@ -44,14 +44,131 @@ themselves off the old `sqlite3` API, covered in `references/testing.md`).
 
 Three concerns, three places:
 
-- **`services/yolo/models.py`** — declarative SQLAlchemy models. Tables are
+- **[services/yolo/models.py](services/yolo/models.py)** — declarative SQLAlchemy models. Tables are
   created from these definitions, so no hand-written `CREATE TABLE`.
-- **`services/yolo/db.py`** — the engine, SessionLocal factory, `get_db()`
+- **[services/yolo/db.py](services/yolo/db.py)** — the engine, SessionLocal factory, `get_db()`
   generator dependency, and `init_db()` that calls `Base.metadata.create_all`.
   Backend is chosen here from `DB_BACKEND` (sqlite default, postgres opt-in).
-- **`services/yolo/app.py`** — endpoints only. Each endpoint that touches the DB
+- **[services/yolo/app.py](services/yolo/app.py)** — endpoints only. Each endpoint that touches the DB
   declares `db: Session = Depends(get_db)` and uses the ORM. No `import
   sqlite3`, no SQL strings, no connection management in `app.py`.
+
+## Python implementation examples from this project
+
+These snippets show the concrete implementation style used in the current codebase.
+
+### 1) SQLAlchemy models
+
+```python
+from sqlalchemy import Column, String, DateTime, Integer, Float, Index
+from sqlalchemy.orm import declarative_base
+from datetime import datetime
+
+Base = declarative_base()
+
+
+class PredictionSession(Base):
+    __tablename__ = "prediction_sessions"
+
+    uid = Column(String, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    original_image = Column(String)
+    predicted_image = Column(String)
+
+
+class DetectionObject(Base):
+    __tablename__ = "detection_objects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    prediction_uid = Column(String)
+    label = Column(String)
+    score = Column(Float)
+    box = Column(String)
+
+    __table_args__ = (
+        Index("idx_prediction_uid", "prediction_uid"),
+        Index("idx_label", "label"),
+        Index("idx_score", "score"),
+    )
+```
+
+### 2) Database session setup and backend selection
+
+```python
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models import Base
+
+DB_BACKEND = os.getenv("DB_BACKEND", "sqlite")
+DB_USER = os.getenv("DB_USER", "user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "pass")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_NAME = os.getenv("DB_NAME", "predictions")
+
+if DB_BACKEND == "postgres":
+    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}"
+else:
+    DATABASE_URL = "sqlite:///./predictions.db"
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+### 3) Endpoint using ORM dependency injection
+
+```python
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from db import get_db
+from models import PredictionSession, DetectionObject
+
+@app.post("/predict")
+def predict(request: dict, db: Session = Depends(get_db)):
+    uid = str(uuid.uuid4())
+
+    db.add(PredictionSession(uid=uid, original_image="image-key", predicted_image="predicted-key"))
+
+    for box in results[0].boxes:
+        db.add(DetectionObject(prediction_uid=uid, label=label, score=score, box=str(bbox)))
+
+    db.commit()
+    return {"prediction_uid": uid}
+```
+
+## Presentation-ready summary
+
+If you need to explain this assignment in a presentation or report, focus on these points:
+
+- The assignment started from a service that stored prediction data in raw SQLite logic and scattered database code through the API layer.
+- The refactor moved persistence into dedicated SQLAlchemy models and a database session manager.
+- The API endpoints still keep the same public behavior: same paths, same response shapes, and same status codes.
+- The implementation is database-agnostic: the same code can use SQLite locally and Postgres in production by changing environment variables.
+- The logic is now cleaner because the FastAPI app deals with requests and business flow, while the database layer handles storage and queries.
+
+### What to say about the implementation
+
+1. The models in [services/yolo/models.py](services/yolo/models.py) define the schema for prediction sessions and detected objects.
+2. The database layer in [services/yolo/db.py](services/yolo/db.py) configures the engine, creates sessions, and exposes a dependency for FastAPI.
+3. The endpoints in [services/yolo/app.py](services/yolo/app.py) now use `Depends(get_db)` and SQLAlchemy ORM queries instead of raw SQL.
+4. The service still supports the same API contract, so this is an internal architecture improvement rather than a feature break.
+5. Verification was done by running the test suite and starting the app to ensure the refactor did not change behavior.
 
 Column types must mirror the current SQLite schema exactly:
 
