@@ -1,0 +1,67 @@
+name: Deploy YOLO
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'services/yolo/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: services/yolo
+          push: true
+          tags: sleemaneketeh/yolo-service:${{ github.sha }}
+
+  deploy-dev:
+    if: github.ref == 'refs/heads/dev'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy to dev
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/PolyAiFursa
+            git pull origin dev
+            SHA="${{ github.sha }}"
+            sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
+            docker compose pull --ignore-pull-failures
+            docker compose up -d --no-build
+            docker compose ps
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy to prod
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/PolyAiFursa
+            git pull origin main
+            SHA="${{ github.sha }}"
+            sed -i "s/^YOLO_TAG=.*/YOLO_TAG=$SHA/" .env
+            docker compose pull --ignore-pull-failures
+            docker compose up -d --no-build
+            docker compose ps

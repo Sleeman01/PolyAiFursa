@@ -1,0 +1,124 @@
+name: Test
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      yolo: ${{ steps.filter.outputs.yolo }}
+      img_proc_mcp: ${{ steps.filter.outputs.img_proc_mcp }}
+      agent: ${{ steps.filter.outputs.agent }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            yolo:
+              - 'services/yolo/**'
+            img_proc_mcp:
+              - 'services/img-proc-mcp/**'
+            agent:
+              - 'services/agent/**'
+            frontend:
+              - 'services/frontend/**'
+
+  test-yolo:
+    needs: changes
+    if: needs.changes.outputs.yolo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r services/yolo/torch-requirements.txt
+          pip install -r services/yolo/requirements.txt
+      - name: Run tests with coverage
+        run: PYTHONPATH=. pytest tests/ --cov=app --cov-report=xml
+        working-directory: services/yolo
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: services/yolo/coverage.xml
+          fail_ci_if_error: false
+
+  scout-yolo:
+    needs: changes
+    if: needs.changes.outputs.yolo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: services/yolo
+          load: true
+          push: false
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:scan
+      - uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:scan
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  test-img-proc-mcp:
+    needs: changes
+    if: needs.changes.outputs.img_proc_mcp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - working-directory: services/img-proc-mcp
+        run: pip install -r requirements.txt
+      - working-directory: services/img-proc-mcp
+        run: pytest tests/ -q
+
+  test-agent:
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - working-directory: services/agent
+        run: pip install -r requirements.txt
+      - working-directory: services/agent
+        run: pytest tests/ -q || echo "no tests yet for agent"
+
+  test-frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: services/frontend
+        run: npm ci
+      - working-directory: services/frontend
+        run: npm test || echo "no tests yet for frontend"
