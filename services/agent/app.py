@@ -54,8 +54,14 @@ if MODEL not in ALLOWED_MODELS:
         f"Set MODEL in your .env to one of the supported text-only models:\n  {allowed_list}\n"
     )
 
+
 SYSTEM_PROMPT = (
     "You are an AI vision assistant that analyzes and edits uploaded images. "
+    "Never mention tools, instructions, your own previous responses, or your "
+    "reasoning process in replies to the user -- just give short, natural "
+    "answers. When describing image content after detect_objects or "
+    "get_detections, respond with ONLY a brief, direct description (e.g. 'I "
+    "see three dogs.'), nothing more. "
     "Every user message describing a new edit (blur, rotate, flip, noise) is a "
     "NEW request that requires a NEW call to process_region — even if a previous "
     "turn already did something similar. Never respond with confirmation text "
@@ -69,9 +75,14 @@ SYSTEM_PROMPT = (
     "the 'position' field already computed and returned by get_detections — do "
     "NOT estimate position yourself from the raw box coordinates, the "
     "pre-computed 'position' field is authoritative and correct. "
-    "If the user asks to see, view, or show the current image, or says they "
-    "don't see an image, call show_current_image — do not just claim you've "
-    "shown it in text. "
+    "Use detect_objects or get_detections whenever the user asks about the "
+    "CONTENT of the image -- e.g. 'what do you see', 'what's in this image', "
+    "'describe the image', 'what objects are here' -- and then answer in "
+    "plain text describing what was detected. "
+    "Only call show_current_image when the user asks to literally view/redisplay "
+    "the image with NO description needed -- e.g. 'show me the image', 'I don't "
+    "see it', 'can I see the result' -- these are requests to re-send the image, "
+    "not requests to describe it. "
     "After process_region or show_current_image succeeds for THIS message, the "
     "task is complete. Do not call more tools."
 )
@@ -393,6 +404,7 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     nudge_count = 0
     max_nudges = 2
+    any_tool_called = False
 
     for _ in range(max_iterations):
         response: AIMessage = await llm_with_tools.ainvoke(messages)
@@ -406,7 +418,10 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
                     part.get("text", "") if isinstance(part, dict) else str(part)
                     for part in content
                 )
-            if nudge_count < max_nudges:
+            # Only nudge if NO tool has been called yet this request -- if one
+            # already ran (e.g. get_detections), a plain-text answer now is the
+            # correct, expected way to finish, not a skipped tool call.
+            if not any_tool_called and nudge_count < max_nudges:
                 # Known failure mode: a small model, deep in a repetitive
                 # conversation, sometimes just repeats a prior confirmation
                 # phrase in plain text instead of actually calling a tool.
@@ -415,11 +430,9 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
                 nudge_count += 1
                 messages.append(AIMessage(content=content))
                 messages.append(HumanMessage(content=(
-                    "You responded without calling any tool. If the previous "
-                    "user message requested an image edit (blur, rotate, flip, "
-                    "noise) or asked to see/view the image, you must call "
-                    "process_region or show_current_image now instead of just "
-                    "repeating a confirmation in text."
+                    "Call the correct tool now for the previous user message. "
+                    "Do not explain, apologize, or describe what you are about "
+                    "to do -- just call the tool."
                 )))
                 continue
             return content
@@ -434,6 +447,7 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
 
             tool_result = await tool_fn.ainvoke(tool_call)
             messages.append(tool_result)
+            any_tool_called = True
 
             # The edited image is already stored for the /chat response.
             # Do not ask the model to perform more unnecessary steps.
