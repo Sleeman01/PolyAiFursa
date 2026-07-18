@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: yolo
-          image: docker.io/sleemaneketeh/yolo-service:8121b379d7563952b277fdde18f03b8a4b58e252
+          image: docker.io/sleemaneketeh/yolo-service:83e2486a1f6f3ae78206f7894b2eada6441c95d3
           ports:
             - containerPort: 8080
           env:
