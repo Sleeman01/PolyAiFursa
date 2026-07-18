@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Sleeman01/PolyAiFursa
-    targetRevision: HEAD
+    targetRevision: dev
     path: infra/k8s/dev/yolo
   destination:
     server: https://kubernetes.default.svc
