@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: yolo
-          image: sleemaneketeh/yolo-service:latest
+          image: docker.io/sleemaneketeh/yolo-service:latest
           ports:
             - containerPort: 8080
           env:
