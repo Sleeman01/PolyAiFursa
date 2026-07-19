@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  labels:
+    app: agent
+    env: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+        env: dev
+    spec:
+      containers:
+        - name: agent
+          image: docker.io/sleemaneketeh/agent:8c8a036b1b9ab3ec4e3bc16fb51f6003c99c076b
+          ports:
+            - containerPort: 8000
+          env:
+            - name: YOLO_SERVICE_URL
+              value: http://yolo:8080
+            - name: MCP_SERVICE_URL
+              value: http://img-proc-mcp:9000/mcp
+            - name: MODEL
+              value: "bedrock_converse:amazon.nova-lite-v1:0"
+            - name: AWS_REGION
+              value: us-east-1
+            - name: AWS_S3_BUCKET
+              value: sleeman-polyai-images
+            - name: CORS_ALLOW_ORIGINS
+              value: "http://localhost:3000"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
