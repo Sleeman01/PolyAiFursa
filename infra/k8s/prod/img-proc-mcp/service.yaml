@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: img-proc-mcp
+  labels:
+    app: img-proc-mcp
+    env: prod
+spec:
+  selector:
+    app: img-proc-mcp
+  ports:
+    - port: 9000
+      targetPort: 9000

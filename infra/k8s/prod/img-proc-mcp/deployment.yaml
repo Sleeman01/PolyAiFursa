@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: img-proc-mcp
+  labels:
+    app: img-proc-mcp
+    env: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: img-proc-mcp
+  template:
+    metadata:
+      labels:
+        app: img-proc-mcp
+        env: prod
+    spec:
+      containers:
+        - name: img-proc-mcp
+          image: docker.io/sleemaneketeh/img-proc-mcp:bfafc03edc5dcfb5bc173feaec4d788d03a3f60b
+          ports:
+            - containerPort: 9000
+          env:
+            - name: MCP_PORT
+              value: "9000"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          readinessProbe:
+            tcpSocket:
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            tcpSocket:
+              port: 9000
+            initialDelaySeconds: 20
+            periodSeconds: 15
