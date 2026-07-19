@@ -8,10 +8,17 @@ spec:
   source:
     repoURL: https://github.com/Sleeman01/PolyAiFursa
     targetRevision: HEAD
-    path: infra/k8s/prod/yolo
+    path: infra/k8s/prod
+    directory:
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
   syncPolicy:
     syncOptions:
       - CreateNamespace=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
