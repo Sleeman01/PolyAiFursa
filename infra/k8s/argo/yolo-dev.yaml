@@ -8,7 +8,9 @@ spec:
   source:
     repoURL: https://github.com/Sleeman01/PolyAiFursa
     targetRevision: dev
-    path: infra/k8s/dev/yolo
+    path: infra/k8s/dev
+    directory:
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: dev
@@ -18,3 +20,8 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
