@@ -121,6 +121,16 @@ services:
     depends_on:
       - prometheus
 
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
+    networks:
+      - polyai-net
+    restart: unless-stopped
+
 networks:
   polyai-net:
   monitoring-net:
