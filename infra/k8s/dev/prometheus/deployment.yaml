@@ -18,6 +18,8 @@ spec:
         app: prometheus
         env: dev
     spec:
+      securityContext:
+        fsGroup: 65534
       containers:
         - name: prometheus
           image: prom/prometheus
