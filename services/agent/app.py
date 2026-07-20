@@ -20,8 +20,10 @@ logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 
 import httpx
 import asyncio
+import time
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -97,6 +99,11 @@ _current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", defa
 # gives each request (each asyncio task) its own isolated dict instead.
 _prediction_holder_var: ContextVar[Optional[dict]] = ContextVar("prediction_holder", default=None)
 
+# Same per-request isolation pattern: accumulates input/output token counts
+# across every LLM call made during one /chat request's agent loop (there can
+# be several, one per tool-call round trip).
+_token_usage_var: ContextVar[Optional[dict]] = ContextVar("token_usage", default=None)
+
 
 def _get_holder() -> dict:
     """Get this request's prediction holder dict, creating one if it doesn't exist yet."""
@@ -105,6 +112,15 @@ def _get_holder() -> dict:
         holder = {}
         _prediction_holder_var.set(holder)
     return holder
+
+
+def _get_token_usage() -> dict:
+    """Get this request's token usage accumulator, creating one if it doesn't exist yet."""
+    usage = _token_usage_var.get()
+    if usage is None:
+        usage = {"input": 0, "output": 0}
+        _token_usage_var.set(usage)
+    return usage
 
 
 def _parse_box(box_val):
@@ -410,6 +426,13 @@ async def run_agent(history: list, max_iterations: int = 10) -> str:
         response: AIMessage = await llm_with_tools.ainvoke(messages)
         messages.append(response)
 
+        # usage_metadata isn't always populated (depends on provider/mode),
+        # so accumulate defensively rather than assuming it's there.
+        usage = getattr(response, "usage_metadata", None) or {}
+        token_usage = _get_token_usage()
+        token_usage["input"] += usage.get("input_tokens", 0) or 0
+        token_usage["output"] += usage.get("output_tokens", 0) or 0
+
         # No tool calls, the model produced its final answer
         if not response.tool_calls:
             content = response.content
@@ -475,6 +498,26 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+# --- Prometheus metrics ---
+chat_requests_total = Counter(
+    "agent_chat_requests_total",
+    "Total /chat requests, split by outcome",
+    ["status"],  # "success" or "error"
+)
+chat_request_latency_seconds = Histogram(
+    "agent_chat_request_latency_seconds",
+    "Latency of /chat requests in seconds",
+    buckets=(0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120),
+)
+chat_input_tokens_total = Counter(
+    "agent_chat_input_tokens_total",
+    "Total LLM input tokens consumed across /chat requests",
+)
+chat_output_tokens_total = Counter(
+    "agent_chat_output_tokens_total",
+    "Total LLM output tokens generated across /chat requests",
+)
+
 
 class ChatMessage(BaseModel):
     role: str                           # "user" or "assistant"
@@ -515,6 +558,8 @@ async def chat(request: ChatRequest):
     # it has its own separate dict via its own ContextVar token, so neither can
     # clobber the other's result.
     holder_token = _prediction_holder_var.set({})
+    usage_token = _token_usage_var.set({"input": 0, "output": 0})
+    start_time = time.time()
     try:
         answer = await run_agent(lc_messages)
         annotated = None
@@ -532,16 +577,31 @@ async def chat(request: ChatRequest):
                     annotated = base64.b64encode(img_resp.content).decode("utf-8")
                 except Exception:
                     annotated = None
+
+        chat_requests_total.labels(status="success").inc()
+        usage = _get_token_usage()
+        chat_input_tokens_total.inc(usage["input"])
+        chat_output_tokens_total.inc(usage["output"])
         return ChatResponse(response=answer, annotated_image_base64=annotated)
+    except Exception:
+        chat_requests_total.labels(status="error").inc()
+        raise
     finally:
+        chat_request_latency_seconds.observe(time.time() - start_time)
         _current_image_b64.reset(token)
         _current_chat_id.reset(chat_token)
         _prediction_holder_var.reset(holder_token)
+        _token_usage_var.reset(usage_token)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 if __name__ == "__main__":
