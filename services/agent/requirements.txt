@@ -17,3 +17,4 @@ langchain-aws
 pillow
 langchain-mcp-adapters
 pytest
+prometheus_client
