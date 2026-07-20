@@ -13,3 +13,6 @@ data:
       - job_name: 'yolo-service'
         static_configs:
           - targets: ['yolo:8080']
+      - job_name: 'agent-service'
+        static_configs:
+          - targets: ['agent:8000']
