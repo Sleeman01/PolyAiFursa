@@ -16,10 +16,11 @@ Environment variables (see .vscode/mcp.json):
   DEV_SSH_KEY_PATH, PROD_SSH_KEY_PATH       - local path to the .pem key
   SSH_USER                                  - defaults to "ubuntu"
 
-Known limitation: Docker's json-file log driver does not embed the
-container/service name into the log file path or content - only the
-container ID. To resolve a friendly name like "yolo" to its current
-container ID, this server SSHes into the relevant EC2 box and runs
+Container identification: the S3 key itself encodes the source container ID
+(fluent-bit.conf's s3_key_format uses $TAG[5], the container ID segment from
+the tail input's path-derived tag) and the upload time. To resolve a
+friendly compose service name (e.g. "yolo") to its current container ID,
+this server SSHes into the relevant EC2 box and runs
 `docker compose ps -q <service>`. If SSH env vars aren't set, service-name
 lookups fail gracefully and the caller should use list_log_sources /
 search_logs instead.
@@ -58,8 +59,11 @@ ENV_CONFIG = {
 
 _s3 = boto3.client("s3", region_name=AWS_REGION)
 
-# Matches keys like: logs/2026/07/20/var_073522.gz-objectUYai0e4R
-_KEY_TIME_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/var_(\d{2})(\d{2})(\d{2})\.gz")
+# Matches keys like: logs/2026/07/20/6961fc41ef60d942.../073522.gz-objectUYai0e4R
+# The segment before the timestamp is the container ID, via s3_key_format's $TAG[5].
+_KEY_RE = re.compile(
+    r"/(\d{4})/(\d{2})/(\d{2})/([0-9a-f]{8,64})_(\d{2})(\d{2})(\d{2})\.gz"
+)
 
 
 def _env_cfg(environment: str) -> dict:
@@ -69,18 +73,21 @@ def _env_cfg(environment: str) -> dict:
     return ENV_CONFIG[environment]
 
 
-def _parse_key_time(key: str):
-    """Best-effort upload time parsed from the S3 key itself, UTC."""
-    m = _KEY_TIME_RE.search(key)
+def _parse_key(key: str):
+    """Returns (container_id, upload_time_utc) parsed from the S3 key, or
+    (None, None) if the key doesn't match the expected format."""
+    m = _KEY_RE.search(key)
     if not m:
-        return None
-    y, mo, d, h, mi, s = (int(x) for x in m.groups())
-    return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc)
+        return None, None
+    y, mo, d, cid, h, mi, s = m.groups()
+    t = datetime(int(y), int(mo), int(d), int(h), int(mi), int(s), tzinfo=timezone.utc)
+    return cid, t
 
 
-def _list_candidate_keys(bucket: str, start: datetime, end: datetime, buffer_minutes: int = 5):
-    """List S3 keys whose upload time (parsed from the key) falls within
-    [start - buffer, end + buffer]. Walks one prefix per UTC day covered."""
+def _list_candidate_keys(bucket, start, end, buffer_minutes=5, container_id=None):
+    """List S3 keys within [start - buffer, end + buffer], optionally
+    filtered to a single container ID (matched by prefix, at the key level
+    - no need to download objects that clearly aren't a match)."""
     start_b = start - timedelta(minutes=buffer_minutes)
     end_b = end + timedelta(minutes=buffer_minutes)
     day = start_b.date()
@@ -91,9 +98,12 @@ def _list_candidate_keys(bucket: str, start: datetime, end: datetime, buffer_min
         prefix = f"logs/{day:%Y/%m/%d}/"
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
-                key_time = _parse_key_time(obj["Key"])
-                if key_time is None or (start_b <= key_time <= end_b):
-                    keys.append(obj["Key"])
+                cid, key_time = _parse_key(obj["Key"])
+                if key_time is not None and not (start_b <= key_time <= end_b):
+                    continue
+                if container_id and cid and not cid.startswith(container_id):
+                    continue
+                keys.append(obj["Key"])
         day += timedelta(days=1)
     return keys
 
@@ -159,8 +169,7 @@ def _resolve_container_id(environment: str, service: str) -> str:
 @mcp.tool()
 def list_log_sources(environment: str = "dev", minutes: int = 60) -> str:
     """List distinct containers that have shipped logs to S3 in the last N minutes.
-    Returns container IDs (Docker doesn't expose friendly service names in the
-    raw log path), the host they ran on, and when they were last seen.
+    Returns container IDs, and when they were last seen.
     environment: 'dev' or 'prod'. minutes: how far back to look (default 60)."""
     cfg = _env_cfg(environment)
     if not cfg["bucket"]:
@@ -171,34 +180,20 @@ def list_log_sources(environment: str = "dev", minutes: int = 60) -> str:
     if not keys:
         return f"No log objects found for '{environment}' in the last {minutes} minute(s)."
 
-    sources = {}  # container_id -> {host, last_seen}
-    for key in keys[:200]:
-        try:
-            text = _fetch_and_decompress(cfg["bucket"], key)
-        except Exception:
+    sources = {}  # container_id -> last_seen
+    for key in keys:
+        cid, key_time = _parse_key(key)
+        if not cid:
             continue
-        for line in text.splitlines():
-            m = re.search(r'"filename":"([^"]*containers/([0-9a-f]{12,64})/[^"]*)"', line)
-            host_m = re.search(r'"host":"([^"]*)"', line)
-            time_m = re.search(r'"time":"([^"]*)"', line)
-            if not m:
-                continue
-            cid = m.group(2)[:12]
-            entry = sources.setdefault(cid, {"host": None, "last_seen": None})
-            if host_m:
-                entry["host"] = host_m.group(1)
-            if time_m:
-                entry["last_seen"] = time_m.group(1)
+        if key_time and (cid not in sources or key_time > sources[cid]):
+            sources[cid] = key_time
 
     if not sources:
-        return (
-            f"Found {len(keys)} log object(s) for '{environment}' but couldn't extract "
-            "container IDs (make sure fluent-bit.conf has 'Path_Key filename' set)."
-        )
+        return f"Found {len(keys)} log object(s) for '{environment}' but couldn't parse container IDs from key names."
 
     lines = [f"Containers shipping logs in '{environment}' (last {minutes}m):"]
-    for cid, info in sources.items():
-        lines.append(f"  - {cid}  host={info['host']}  last_seen={info['last_seen']}")
+    for cid, last_seen in sorted(sources.items(), key=lambda kv: kv[1], reverse=True):
+        lines.append(f"  - {cid}  last_seen={last_seen.isoformat()}")
     return "\n".join(lines)
 
 
@@ -225,7 +220,7 @@ def search_logs(
         return f"No S3 bucket configured for environment '{environment}'."
 
     start, end = _resolve_window(minutes, start_time or None, end_time or None)
-    keys = _list_candidate_keys(cfg["bucket"], start, end)
+    keys = _list_candidate_keys(cfg["bucket"], start, end, container_id=container_id or None)
     if not keys:
         return f"No log objects found for '{environment}' between {start} and {end}."
 
@@ -237,8 +232,6 @@ def search_logs(
         except Exception:
             continue
         for line in text.splitlines():
-            if container_id and container_id not in line:
-                continue
             if keyword_l and keyword_l not in line.lower():
                 continue
             results.append(line)
