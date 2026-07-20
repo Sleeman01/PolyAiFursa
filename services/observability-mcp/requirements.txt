@@ -1,0 +1,4 @@
+mcp[cli]
+boto3
+requests
+paramiko
