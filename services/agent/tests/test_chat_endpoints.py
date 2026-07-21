@@ -86,3 +86,39 @@ def test_chat_missing_thread_id_and_image_is_400():
     with TestClient(app_module.app) as client:
         resp = client.post("/chat", json={"message": "hello"})
     assert resp.status_code == 400
+
+
+def test_chat_nudges_when_llm_skips_tool_call_then_recovers(monkeypatch, test_image_b64):
+    """LLM answers in plain text twice (skipping the tool call it should have
+    made), then calls the tool on the third attempt. The graph's nudge loop
+    should catch this and retry rather than silently ending with no edit."""
+    _patch_llm(monkeypatch, [
+        make_ai_message(content="Sure, I'll get right on that!"),  # no tool_calls -- should nudge
+        make_ai_message(content="Rotating now..."),                # still no tool_calls -- should nudge again
+        make_ai_message(tool_calls=ROTATE_CALL),                   # finally calls the tool
+    ])
+    with TestClient(app_module.app) as client:
+        resp = client.post("/chat", json={"message": "rotate this 90 degrees", "image_base64": test_image_b64})
+    assert resp.status_code == 200
+    data = resp.json()
+    # The graph recovered and reached the confirmation gate for the real edit,
+    # rather than ending after the first tool-less response.
+    assert data["awaiting_confirmation"] is not None
+    assert data["awaiting_confirmation"]["proposed"]["tool_name"] == "rotate"
+
+
+def test_chat_gives_up_after_max_nudges(monkeypatch, test_image_b64):
+    """If the LLM never calls a tool even after the nudge cap, the graph
+    ends with whatever plain-text answer it last gave, rather than looping
+    forever or crashing."""
+    _patch_llm(monkeypatch, [
+        make_ai_message(content="Attempt 1"),
+        make_ai_message(content="Attempt 2"),
+        make_ai_message(content="Attempt 3 -- giving up"),
+    ])
+    with TestClient(app_module.app) as client:
+        resp = client.post("/chat", json={"message": "rotate this 90 degrees", "image_base64": test_image_b64})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["awaiting_confirmation"] is None
+    assert data["response"] == "Attempt 3 -- giving up"

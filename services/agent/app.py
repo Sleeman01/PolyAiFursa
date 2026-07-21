@@ -564,12 +564,14 @@ async def chat(request: ChatRequest):
             "detections_for_key": None,
             "pending_edit": None,
             "tools_called": [],
+            "tool_called_this_turn": False,
+            "nudge_count": 0,
         }
     else:
         if not request.thread_id:
             raise HTTPException(status_code=400, detail="thread_id is required when no image is provided")
         new_thread_id = request.thread_id
-        state = {"messages": [{"role": "user", "content": request.message}]}
+        state = {"messages": [{"role": "user", "content": request.message}], "tool_called_this_turn": False, "nudge_count": 0}
 
     chat_token = _current_chat_id.set(new_thread_id)
     holder_token = _prediction_holder_var.set({})
