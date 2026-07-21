@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: agent
-          image: docker.io/sleemaneketeh/agent:8c8a036b1b9ab3ec4e3bc16fb51f6003c99c076b
+          image: docker.io/sleemaneketeh/agent:8e3edb4ec9a9793ec0f01b18595d9deab8a95d4b
           ports:
             - containerPort: 8000
           env:
