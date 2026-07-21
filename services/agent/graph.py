@@ -3,9 +3,11 @@ import json
 import uuid
 from typing import Annotated, Optional
 from typing_extensions import TypedDict
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, HumanMessage
 from langgraph.graph.message import add_messages
 import operator
+
+MAX_NUDGES = 2
 
 
 def keys_reducer(current: list, update):
@@ -25,6 +27,13 @@ class VisionState(TypedDict):
     detections_for_key: Optional[str]
     pending_edit: Optional[dict]
     tools_called: Annotated[list, operator.add]
+    # Reset to False/0 at the start of each NEW /chat turn by the caller.
+    # NOT reset on /chat/confirm resume, since that's mid-turn continuation --
+    # a tool call already happened earlier this turn (the one now pending
+    # confirmation), so the eventual text answer after confirm/decline is a
+    # legitimate completion, not a skipped tool call.
+    tool_called_this_turn: bool
+    nudge_count: int
 
 
 def _current_key(state: VisionState) -> str:
@@ -44,15 +53,43 @@ def build_agent_node(llm_with_tools, system_prompt):
     async def agent_node(state: VisionState) -> dict:
         messages = [system_prompt] + state["messages"]
         response = await llm_with_tools.ainvoke(messages)
-        return {"messages": [response]}
+        update = {"messages": [response]}
+        # Requesting a tool -- even one later gated behind await_confirm --
+        # counts as the agent having done its job this turn. This must be
+        # set here (not in a downstream node) because a tool-less response
+        # never reaches any downstream node at all.
+        if getattr(response, "tool_calls", None):
+            update["tool_called_this_turn"] = True
+        return update
     return agent_node
+
+
+def build_nudge_node():
+    """Structural replacement for the old app.py nudge-loop: instead of the
+    HTTP handler manually retrying with a corrective HumanMessage, the graph
+    itself routes here when the LLM answers in plain text without having
+    called any tool yet this turn, and loops back to agent."""
+    async def nudge_node(state: VisionState) -> dict:
+        return {
+            "messages": [HumanMessage(content=(
+                "Call the correct tool now for the previous user message. "
+                "Do not explain, apologize, or describe what you are about "
+                "to do -- just call the tool."
+            ))],
+            "nudge_count": state.get("nudge_count", 0) + 1,
+        }
+    return nudge_node
 
 
 def build_run_detection_node(detect_objects_tool, get_detections_tool, s3_client, bucket, current_image_var):
     async def run_detection_node(state: VisionState) -> dict:
         last = state["messages"][-1]
         current_key = _current_key(state)
-        image_b64 = _download_b64(s3_client, bucket, current_key)
+        # No image was ever uploaded this conversation (current_key is None) --
+        # don't attempt an S3 download with a None key. Leave the ContextVar
+        # unset so the underlying tool's own "No image was provided" check
+        # returns a graceful error instead of crashing on a bad S3 call.
+        image_b64 = _download_b64(s3_client, bucket, current_key) if current_key else None
         token = current_image_var.set(image_b64)
         results, detections, called = [], None, []
         tool_map = {detect_objects_tool.name: detect_objects_tool, get_detections_tool.name: get_detections_tool}
@@ -87,7 +124,7 @@ def build_run_img_proc_node(process_region_tool, show_current_image_tool, s3_cli
     async def run_img_proc_node(state: VisionState) -> dict:
         last = state["messages"][-1]
         current_key = _current_key(state)
-        image_b64 = _download_b64(s3_client, bucket, current_key)
+        image_b64 = _download_b64(s3_client, bucket, current_key) if current_key else None
         token = current_image_var.set(image_b64)
         tool_map = {
             process_region_tool.name: process_region_tool,
@@ -161,7 +198,12 @@ def build_await_confirm_node():
 def route_after_agent(state: VisionState) -> str:
     last = state["messages"][-1]
     if not getattr(last, "tool_calls", None):
-        return "end"
+        if state.get("tool_called_this_turn"):
+            return "end"
+        if state.get("nudge_count", 0) < MAX_NUDGES:
+            return "nudge"
+        return "end"  # exhausted nudges -- accept whatever plain-text answer it gave
+
     requested = {tc["name"] for tc in last.tool_calls}
     current_key = _current_key(state)
     if requested & {"detect_objects", "get_detections"}:
@@ -191,6 +233,7 @@ def build_graph(llm_with_tools, system_prompt, tools_by_name, s3_client, bucket,
 
     g = StateGraph(VisionState)
     g.add_node("agent", build_agent_node(llm_with_tools, system_prompt))
+    g.add_node("nudge", build_nudge_node())
     g.add_node("run_detection", build_run_detection_node(
         tools_by_name["detect_objects"], tools_by_name["get_detections"], s3_client, bucket, current_image_var))
     g.add_node("run_img_proc", build_run_img_proc_node(
@@ -200,6 +243,7 @@ def build_graph(llm_with_tools, system_prompt, tools_by_name, s3_client, bucket,
 
     g.add_edge(START, "agent")
     g.add_conditional_edges("agent", route_after_agent, {
+        "nudge": "nudge",
         "run_detection": "run_detection",
         "await_confirm": "await_confirm",
         "run_img_proc": "run_img_proc",
@@ -210,6 +254,7 @@ def build_graph(llm_with_tools, system_prompt, tools_by_name, s3_client, bucket,
         "run_img_proc": "run_img_proc",
         "agent": "agent",
     })
+    g.add_edge("nudge", "agent")
     g.add_edge("run_detection", "agent")
     g.add_edge("run_img_proc", "agent")
     g.add_edge("run_undo", "agent")
