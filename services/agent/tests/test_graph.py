@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
@@ -72,8 +72,22 @@ def test_keys_reducer_replace_to_empty():
 
 # --- route_after_agent ---
 
-def test_route_no_tool_calls_ends():
-    state = make_state(messages=[msg_with_calls([])])
+def test_route_no_tool_calls_but_already_did_work_ends():
+    # A tool already ran earlier this turn -- a plain-text follow-up is a
+    # legitimate final answer, not a skipped tool call.
+    state = make_state(messages=[msg_with_calls([])], tool_called_this_turn=True)
+    assert route_after_agent(state) == "end"
+
+
+def test_route_no_tool_calls_fresh_turn_nudges():
+    # Nothing has happened yet this turn -- the LLM answered in prose
+    # without calling any tool. Route to the corrective nudge, not end.
+    state = make_state(messages=[msg_with_calls([])], tool_called_this_turn=False, nudge_count=0)
+    assert route_after_agent(state) == "nudge"
+
+
+def test_route_no_tool_calls_exhausted_nudges_ends():
+    state = make_state(messages=[msg_with_calls([])], tool_called_this_turn=False, nudge_count=2)
     assert route_after_agent(state) == "end"
 
 
@@ -213,4 +227,49 @@ def test_build_graph_compiles_with_all_nodes():
         MagicMock(), "bucket", ContextVar("v", default=None), lambda: {},
     )
     nodes = set(app.get_graph().nodes.keys())
-    assert nodes == {"__start__", "agent", "run_detection", "run_img_proc", "await_confirm", "run_undo", "__end__"}
+    assert nodes == {"__start__", "agent", "nudge", "run_detection", "run_img_proc", "await_confirm", "run_undo", "__end__"}
+
+
+
+# --- build_nudge_node ---
+
+def test_nudge_node_appends_corrective_message_and_increments_count():
+    from graph import build_nudge_node
+    node = build_nudge_node()
+    state = make_state(nudge_count=1)
+    result = run(node(state))
+    assert result["nudge_count"] == 2
+    assert len(result["messages"]) == 1
+    assert "call the correct tool" in result["messages"][0].content.lower()
+
+
+def test_nudge_node_starts_at_zero_when_unset():
+    from graph import build_nudge_node
+    node = build_nudge_node()
+    state = make_state()  # no nudge_count key at all
+    result = run(node(state))
+    assert result["nudge_count"] == 1
+
+
+# --- build_agent_node marks tool_called_this_turn ---
+
+def test_agent_node_marks_tool_called_when_llm_calls_a_tool():
+    from graph import build_agent_node
+    fake_response = MagicMock()
+    fake_response.tool_calls = [tool_call("process_region")]
+    fake_llm = MagicMock()
+    fake_llm.ainvoke = AsyncMock(return_value=fake_response)
+    node = build_agent_node(fake_llm, "system prompt")
+    result = run(node(make_state()))
+    assert result["tool_called_this_turn"] is True
+
+
+def test_agent_node_does_not_mark_tool_called_on_plain_text():
+    from graph import build_agent_node
+    fake_response = MagicMock()
+    fake_response.tool_calls = []
+    fake_llm = MagicMock()
+    fake_llm.ainvoke = AsyncMock(return_value=fake_response)
+    node = build_agent_node(fake_llm, "system prompt")
+    result = run(node(make_state()))
+    assert "tool_called_this_turn" not in result
