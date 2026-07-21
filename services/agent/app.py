@@ -23,7 +23,7 @@ import asyncio
 import time
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from fastapi import FastAPI, Response, HTTPException
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -565,11 +565,29 @@ async def chat(request: ChatRequest):
             "pending_edit": None,
             "tools_called": [],
         }
-    else:
-        if not request.thread_id:
-            raise HTTPException(status_code=400, detail="thread_id is required when no image is provided")
+    elif request.thread_id:
+        # Continuing an existing conversation -- checkpointer already has
+        # image_key/processed_keys/etc, only the new message needs sending.
         new_thread_id = request.thread_id
-        state = {"messages": [{"role": "user", "content": request.message}]}
+        state = {"messages": [{"role": "user", "content": request.message}], "tool_called_this_turn": False, "nudge_count": 0}
+    else:
+        # Brand-new conversation with no image yet -- perfectly valid (e.g.
+        # "hello", "what can you do"). image_key stays None; any tool that
+        # actually needs an image degrades gracefully with its own
+        # "No image was provided" error rather than this endpoint rejecting
+        # the request outright.
+        new_thread_id = str(uuid.uuid4())
+        state = {
+            "messages": [{"role": "user", "content": request.message}],
+            "image_key": None,
+            "processed_keys": [],
+            "detections": None,
+            "detections_for_key": None,
+            "pending_edit": None,
+            "tools_called": [],
+            "tool_called_this_turn": False,
+            "nudge_count": 0,
+        }
 
     chat_token = _current_chat_id.set(new_thread_id)
     holder_token = _prediction_holder_var.set({})
