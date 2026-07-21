@@ -23,7 +23,7 @@ import asyncio
 import time
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -85,8 +85,10 @@ SYSTEM_PROMPT = (
     "the image with NO description needed -- e.g. 'show me the image', 'I don't "
     "see it', 'can I see the result' -- these are requests to re-send the image, "
     "not requests to describe it. "
-    "After process_region or show_current_image succeeds for THIS message, the "
-    "task is complete. Do not call more tools."
+    "If the user asks to undo, revert, or go back to a previous version of the "
+    "image, call undo_edit. "
+    "After process_region, show_current_image, or undo_edit succeeds for THIS "
+    "message, the task is complete. Do not call more tools."
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
@@ -377,8 +379,17 @@ def show_current_image() -> str:
     return json.dumps({"status": "ok", "message": "Displaying the current image."})
 
 
+@tool
+def undo_edit() -> str:
+    """Revert the most recent edit (blur, rotate, flip, or noise), restoring
+    the image to its state before that edit. Call this when the user asks to
+    undo, revert, or go back to the previous version. Has no effect if no
+    edit has been applied yet."""
+    return json.dumps({"status": "ok", "message": "Reverting to the previous version."})
+
+
 # Local tools the agent always has
-_LOCAL_TOOLS = [detect_objects, get_detections, process_region, show_current_image]
+_LOCAL_TOOLS = [detect_objects, get_detections, process_region, show_current_image, undo_edit]
 
 # Load the image-processing tools from the MCP server once at startup
 def _load_mcp_tools():
@@ -409,82 +420,41 @@ _rate_limiter = InMemoryRateLimiter(
 
 llm = init_chat_model(MODEL, temperature=0, rate_limiter=_rate_limiter)
 llm_with_tools = llm.bind_tools(_all_tools)
+from contextlib import asynccontextmanager
 
-async def run_agent(history: list, max_iterations: int = 10) -> str:
-    """
-    Simple ReAct loop (async, so it can call async MCP tools):
-      1. Send messages to the LLM.
-      2. If the LLM requests tool calls, execute them and append results.
-      3. Repeat until the LLM returns a plain text response.
-    """
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
-    nudge_count = 0
-    max_nudges = 2
-    any_tool_called = False
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
+from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
+from langchain_core.messages import SystemMessage
 
-    for _ in range(max_iterations):
-        response: AIMessage = await llm_with_tools.ainvoke(messages)
-        messages.append(response)
+from graph import build_graph
 
-        # usage_metadata isn't always populated (depends on provider/mode),
-        # so accumulate defensively rather than assuming it's there.
-        usage = getattr(response, "usage_metadata", None) or {}
-        token_usage = _get_token_usage()
-        token_usage["input"] += usage.get("input_tokens", 0) or 0
-        token_usage["output"] += usage.get("output_tokens", 0) or 0
-
-        # No tool calls, the model produced its final answer
-        if not response.tool_calls:
-            content = response.content
-            if isinstance(content, list):
-                content = "".join(
-                    part.get("text", "") if isinstance(part, dict) else str(part)
-                    for part in content
-                )
-            # Only nudge if NO tool has been called yet this request -- if one
-            # already ran (e.g. get_detections), a plain-text answer now is the
-            # correct, expected way to finish, not a skipped tool call.
-            if not any_tool_called and nudge_count < max_nudges:
-                # Known failure mode: a small model, deep in a repetitive
-                # conversation, sometimes just repeats a prior confirmation
-                # phrase in plain text instead of actually calling a tool.
-                # Give it an explicit corrective nudge before accepting
-                # a tool-less answer.
-                nudge_count += 1
-                messages.append(AIMessage(content=content))
-                messages.append(HumanMessage(content=(
-                    "Call the correct tool now for the previous user message. "
-                    "Do not explain, apologize, or describe what you are about "
-                    "to do -- just call the tool."
-                )))
-                continue
-            return content
-
-        # Execute every tool the model requested (ainvoke works for both sync and async tools)
-        for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_fn = TOOLS.get(tool_name)
-
-            if tool_fn is None:
-                return f"Tool {tool_name} is not available."
-
-            tool_result = await tool_fn.ainvoke(tool_call)
-            messages.append(tool_result)
-            any_tool_called = True
-
-            # The edited image is already stored for the /chat response.
-            # Do not ask the model to perform more unnecessary steps.
-            if (
-                tool_name in ("process_region", "show_current_image")
-                and _get_holder().get("result_image_b64")
-            ):
-                return "Here you go."
-
-    # Hit the iteration cap without a final answer
-    return "Sorry, I couldn't complete the request within the allowed number of steps."
+agent_app = None
+_checkpointer_cm = None
 
 
-app = FastAPI(title="Vision Agent")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global agent_app, _checkpointer_cm
+    _checkpointer_cm = AsyncSqliteSaver.from_conn_string("agent_memory.db")
+    checkpointer = await _checkpointer_cm.__aenter__()
+    agent_app = build_graph(
+        llm_with_tools,
+        SystemMessage(content=SYSTEM_PROMPT),
+        TOOLS,
+        s3_client,
+        AWS_S3_BUCKET,
+        _current_image_b64,
+        _get_holder,
+        checkpointer=checkpointer,
+    )
+    try:
+        yield
+    finally:
+        await _checkpointer_cm.__aexit__(None, None, None)
+
+
+app = FastAPI(title="Vision Agent", lifespan=lifespan)
 
 _cors_origins = os.environ.get(
     "CORS_ALLOW_ORIGINS",
@@ -498,11 +468,10 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# --- Prometheus metrics ---
 chat_requests_total = Counter(
     "agent_chat_requests_total",
     "Total /chat requests, split by outcome",
-    ["status"],  # "success" or "error"
+    ["status"],
 )
 chat_request_latency_seconds = Histogram(
     "agent_chat_request_latency_seconds",
@@ -519,79 +488,131 @@ chat_output_tokens_total = Counter(
 )
 
 
-class ChatMessage(BaseModel):
-    role: str                           # "user" or "assistant"
-    content: str
-    image_base64: Optional[str] = None  # only on user messages that carry an image
-
-
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage]         # full conversation thread, oldest first
+    message: str
+    image_base64: Optional[str] = None
+    thread_id: Optional[str] = None
+
+
+class ConfirmRequest(BaseModel):
+    thread_id: str
+    confirmed: bool
 
 
 class ChatResponse(BaseModel):
-    response: str
+    response: Optional[str] = None
     annotated_image_base64: Optional[str] = None
+    thread_id: str
+    awaiting_confirmation: Optional[dict] = None
+
+
+def _record_usage(cb) -> None:
+    for _model_name, usage in cb.usage_metadata.items():
+        chat_input_tokens_total.inc(usage.get("input_tokens", 0) or 0)
+        chat_output_tokens_total.inc(usage.get("output_tokens", 0) or 0)
+
+
+async def _finalize_response(result: dict, thread_id: str) -> ChatResponse:
+    pending = result.get("__interrupt__")
+    if pending:
+        return ChatResponse(thread_id=thread_id, awaiting_confirmation=pending[0].value)
+
+    answer = result["messages"][-1].content
+    if isinstance(answer, list):
+        answer = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in answer
+        )
+
+    annotated = None
+    latest_key = result["processed_keys"][-1] if result.get("processed_keys") else result.get("image_key")
+    if latest_key:
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=latest_key)
+        annotated = base64.b64encode(obj["Body"].read()).decode("utf-8")
+    else:
+        uid = _get_holder().get("uid")
+        if uid:
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
+                    img_resp.raise_for_status()
+                annotated = base64.b64encode(img_resp.content).decode("utf-8")
+            except Exception:
+                annotated = None
+
+    return ChatResponse(response=answer, annotated_image_base64=annotated, thread_id=thread_id)
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    lc_messages = []
-    latest_image = None
-
-    for msg in request.messages:
-        if msg.role == "user":
-            if msg.image_base64:
-                latest_image = msg.image_base64          # saved for detect_objects tool
-                content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
-            else:
-                content = msg.content
-            lc_messages.append(HumanMessage(content=content))
-        else:
-            lc_messages.append(AIMessage(content=msg.content))
-
-    chat_id = str(uuid.uuid4())
-    token = _current_image_b64.set(latest_image)
-    chat_token = _current_chat_id.set(chat_id)
-    # Give this request its own fresh, isolated prediction holder -- this is what
-    # actually fixes the race: even if another request is in flight concurrently,
-    # it has its own separate dict via its own ContextVar token, so neither can
-    # clobber the other's result.
-    holder_token = _prediction_holder_var.set({})
-    usage_token = _token_usage_var.set({"input": 0, "output": 0})
     start_time = time.time()
-    try:
-        answer = await run_agent(lc_messages)
-        annotated = None
-        # If an image edit (process_region) produced a result, return that.
-        edited = _get_holder().get("result_image_b64")
-        if edited:
-            annotated = edited
-        else:
-            uid = _get_holder().get("uid")
-            if uid:
-                try:
-                    with httpx.Client(timeout=30.0) as client:
-                        img_resp = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}/image")
-                        img_resp.raise_for_status()
-                    annotated = base64.b64encode(img_resp.content).decode("utf-8")
-                except Exception:
-                    annotated = None
+    cb = UsageMetadataCallbackHandler()
 
-        chat_requests_total.labels(status="success").inc()
-        usage = _get_token_usage()
-        chat_input_tokens_total.inc(usage["input"])
-        chat_output_tokens_total.inc(usage["output"])
-        return ChatResponse(response=answer, annotated_image_base64=annotated)
+    if request.image_base64:
+        new_thread_id = str(uuid.uuid4())
+        image_bytes = base64.b64decode(request.image_base64)
+        img_key = f"{new_thread_id}/original/image.jpg"
+        s3_client.upload_fileobj(io.BytesIO(image_bytes), AWS_S3_BUCKET, img_key)
+        state = {
+            "messages": [{
+                "role": "user",
+                "content": f"{request.message}\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]",
+            }],
+            "image_key": img_key,
+            "processed_keys": [],
+            "detections": None,
+            "detections_for_key": None,
+            "pending_edit": None,
+            "tools_called": [],
+        }
+    else:
+        if not request.thread_id:
+            raise HTTPException(status_code=400, detail="thread_id is required when no image is provided")
+        new_thread_id = request.thread_id
+        state = {"messages": [{"role": "user", "content": request.message}]}
+
+    chat_token = _current_chat_id.set(new_thread_id)
+    holder_token = _prediction_holder_var.set({})
+    config = {"configurable": {"thread_id": new_thread_id}, "callbacks": [cb]}
+    try:
+        result = await agent_app.ainvoke(state, config=config)
+        response = await _finalize_response(result, new_thread_id)
+        chat_requests_total.labels(
+            status="awaiting_confirmation" if response.awaiting_confirmation else "success"
+        ).inc()
+        _record_usage(cb)
+        return response
     except Exception:
         chat_requests_total.labels(status="error").inc()
         raise
     finally:
         chat_request_latency_seconds.observe(time.time() - start_time)
-        _current_image_b64.reset(token)
         _current_chat_id.reset(chat_token)
         _prediction_holder_var.reset(holder_token)
-        _token_usage_var.reset(usage_token)
+
+
+@app.post("/chat/confirm", response_model=ChatResponse)
+async def chat_confirm(request: ConfirmRequest):
+    start_time = time.time()
+    cb = UsageMetadataCallbackHandler()
+    chat_token = _current_chat_id.set(request.thread_id)
+    holder_token = _prediction_holder_var.set({})
+    config = {"configurable": {"thread_id": request.thread_id}, "callbacks": [cb]}
+    try:
+        result = await agent_app.ainvoke(Command(resume=request.confirmed), config=config)
+        response = await _finalize_response(result, request.thread_id)
+        chat_requests_total.labels(
+            status="awaiting_confirmation" if response.awaiting_confirmation else "success"
+        ).inc()
+        _record_usage(cb)
+        return response
+    except Exception:
+        chat_requests_total.labels(status="error").inc()
+        raise
+    finally:
+        chat_request_latency_seconds.observe(time.time() - start_time)
+        _current_chat_id.reset(chat_token)
+        _prediction_holder_var.reset(holder_token)
 
 
 @app.get("/health")
