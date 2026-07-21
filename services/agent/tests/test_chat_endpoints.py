@@ -82,10 +82,48 @@ def test_chat_confirm_false_declines_edit(monkeypatch, test_image_b64):
     assert data["response"] == "Okay, cancelled."
 
 
-def test_chat_missing_thread_id_and_image_is_400():
+def test_chat_no_image_no_thread_starts_fresh_text_only_conversation(monkeypatch):
+    # Matches the pre-migration app's behavior: plain chat ("hello") doesn't
+    # require an image at all -- only tools that actually need one degrade
+    # gracefully if the LLM tries to use them without an image present.
+    # A plain greeting has no tool to call -- against a real LLM this
+    # genuinely triggers the nudge loop twice (same inherited quirk the
+    # pre-migration app also had) before the graph accepts the answer.
+    # NOTE: must be 3 SEPARATE make_ai_message() calls, not the same object
+    # reused -- LangChain auto-assigns each message an id at construction,
+    # and add_messages treats same-id messages as an update-in-place rather
+    # than an append. A real LLM always returns a distinct object per call.
+    _patch_llm(monkeypatch, [
+        make_ai_message(content="Hi there! Upload an image and I can help edit it."),
+        make_ai_message(content="Hi there! Upload an image and I can help edit it."),
+        make_ai_message(content="Hi there! Upload an image and I can help edit it."),
+    ])
     with TestClient(app_module.app) as client:
         resp = client.post("/chat", json={"message": "hello"})
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["response"] == "Hi there! Upload an image and I can help edit it."
+    assert data["thread_id"]
+    assert data["awaiting_confirmation"] is None
+
+
+DETECT_CALL = [{"name": "detect_objects", "id": "d1", "args": {}}]
+
+
+def test_chat_tool_call_without_image_degrades_gracefully(monkeypatch):
+    # If the LLM tries to use an image tool on a thread that never got an
+    # image, the S3-bridging node must not crash -- the underlying tool's
+    # own "No image was provided" check should produce a normal ToolMessage
+    # the LLM can react to, not a 500.
+    _patch_llm(monkeypatch, [
+        make_ai_message(tool_calls=DETECT_CALL),
+        make_ai_message(content="I don't have an image yet -- please upload one first."),
+    ])
+    with TestClient(app_module.app) as client:
+        resp = client.post("/chat", json={"message": "what's in this image?"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["response"] == "I don't have an image yet -- please upload one first."
 
 
 def test_chat_nudges_when_llm_skips_tool_call_then_recovers(monkeypatch, test_image_b64):

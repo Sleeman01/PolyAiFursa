@@ -85,7 +85,11 @@ def build_run_detection_node(detect_objects_tool, get_detections_tool, s3_client
     async def run_detection_node(state: VisionState) -> dict:
         last = state["messages"][-1]
         current_key = _current_key(state)
-        image_b64 = _download_b64(s3_client, bucket, current_key)
+        # No image was ever uploaded this conversation (current_key is None) --
+        # don't attempt an S3 download with a None key. Leave the ContextVar
+        # unset so the underlying tool's own "No image was provided" check
+        # returns a graceful error instead of crashing on a bad S3 call.
+        image_b64 = _download_b64(s3_client, bucket, current_key) if current_key else None
         token = current_image_var.set(image_b64)
         results, detections, called = [], None, []
         tool_map = {detect_objects_tool.name: detect_objects_tool, get_detections_tool.name: get_detections_tool}
@@ -120,7 +124,7 @@ def build_run_img_proc_node(process_region_tool, show_current_image_tool, s3_cli
     async def run_img_proc_node(state: VisionState) -> dict:
         last = state["messages"][-1]
         current_key = _current_key(state)
-        image_b64 = _download_b64(s3_client, bucket, current_key)
+        image_b64 = _download_b64(s3_client, bucket, current_key) if current_key else None
         token = current_image_var.set(image_b64)
         tool_map = {
             process_region_tool.name: process_region_tool,
