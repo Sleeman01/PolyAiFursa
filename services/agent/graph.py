@@ -5,6 +5,7 @@ from typing import Annotated, Optional
 from typing_extensions import TypedDict
 from langchain_core.messages import ToolMessage, HumanMessage
 from langgraph.graph.message import add_messages
+from langgraph.types import interrupt
 import operator
 
 MAX_NUDGES = 2
@@ -97,6 +98,22 @@ def build_run_detection_node(detect_objects_tool, get_detections_tool, s3_client
             for tc in last.tool_calls:
                 tool_fn = tool_map.get(tc["name"])
                 if tool_fn is None:
+                    # A model provider (e.g. Bedrock Converse) requires every
+                    # tool_use to get a tool_result in the very next message,
+                    # or the NEXT LLM call 500s on a validation error. This
+                    # tool call (e.g. process_region, routed here because
+                    # detections were needed first) isn't ours to execute --
+                    # acknowledge it with a placeholder so the LLM sees a
+                    # well-formed turn and knows to retry it now that
+                    # detections are available.
+                    results.append(ToolMessage(
+                        content=json.dumps({
+                            "status": "pending",
+                            "message": f"Detections were needed first. Now retry the {tc['name']} call using the detection results.",
+                        }),
+                        tool_call_id=tc["id"],
+                    ))
+                    called.append(f"{tc['name']}(deferred)")
                     continue
                 raw = await tool_fn.ainvoke(tc)
                 content = raw.content if hasattr(raw, "content") else str(raw)
@@ -135,6 +152,14 @@ def build_run_img_proc_node(process_region_tool, show_current_image_tool, s3_cli
             for tc in last.tool_calls:
                 tool_fn = tool_map.get(tc["name"])
                 if tool_fn is None:
+                    results.append(ToolMessage(
+                        content=json.dumps({
+                            "status": "pending",
+                            "message": f"Handled a different tool this turn. Please retry {tc['name']} separately.",
+                        }),
+                        tool_call_id=tc["id"],
+                    ))
+                    called.append(f"{tc['name']}(deferred)")
                     continue
                 raw = await tool_fn.ainvoke(tc)
                 results.append(raw)
@@ -171,6 +196,19 @@ def build_run_undo_node():
         results = []
         if tc:
             results.append(ToolMessage(content=json.dumps({"status": "ok", "message": msg}), tool_call_id=tc["id"]))
+        # Respond to any OTHER tool calls in the same message too, so every
+        # tool_use gets a tool_result -- required by providers like Bedrock
+        # Converse, or the next LLM call 500s on a validation error.
+        for other_tc in last.tool_calls:
+            if tc and other_tc["id"] == tc["id"]:
+                continue
+            results.append(ToolMessage(
+                content=json.dumps({
+                    "status": "pending",
+                    "message": f"Handled undo this turn. Please retry {other_tc['name']} separately.",
+                }),
+                tool_call_id=other_tc["id"],
+            ))
         return {
             "messages": results,
             "tools_called": ["undo_edit"],
@@ -180,8 +218,6 @@ def build_run_undo_node():
 
 
 def build_await_confirm_node():
-    from langgraph.types import interrupt
-
     async def await_confirm_node(state: VisionState) -> dict:
         last = state["messages"][-1]
         tc = next(t for t in last.tool_calls if t["name"] == "process_region")
@@ -191,7 +227,31 @@ def build_await_confirm_node():
             "proposed": pending["args"],
             "message": "Apply this edit?",
         })
-        return {"pending_edit": pending, "tools_called": ["await_confirm"]} if decision else {"pending_edit": None}
+        # Any OTHER tool call the LLM made alongside process_region needs a
+        # tool_result too -- run_img_proc_node will pick up process_region's
+        # own result after this, but nothing else responds to a stray extra
+        # tool call, so acknowledge it here to keep the message history valid.
+        extra_messages = [
+            ToolMessage(
+                content=json.dumps({
+                    "status": "pending",
+                    "message": f"Handled the confirmation flow this turn. Please retry {other_tc['name']} separately.",
+                }),
+                tool_call_id=other_tc["id"],
+            )
+            for other_tc in last.tool_calls
+            if other_tc["id"] != tc["id"]
+        ]
+        if decision:
+            return {"pending_edit": pending, "tools_called": ["await_confirm"], "messages": extra_messages}
+        # Declined: run_img_proc_node never runs for this turn, so nothing
+        # else will ever respond to process_region's own tool_use. Respond
+        # to it here or the LLM's next call has a dangling tool_use.
+        decline_message = ToolMessage(
+            content=json.dumps({"status": "cancelled", "message": "The user declined this edit."}),
+            tool_call_id=tc["id"],
+        )
+        return {"pending_edit": None, "messages": [decline_message] + extra_messages}
     return await_confirm_node
 
 
