@@ -125,6 +125,8 @@ services:
 
   fluent-bit:
     image: fluent/fluent-bit:4.2.7
+    environment:
+      - S3_LOGS_BUCKET=${S3_LOGS_BUCKET}
     volumes:
       - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
