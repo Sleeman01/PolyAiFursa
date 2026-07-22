@@ -64,12 +64,15 @@ SYSTEM_PROMPT = (
     "answers. When describing image content after detect_objects or "
     "get_detections, respond with ONLY a brief, direct description (e.g. 'I "
     "see three dogs.'), nothing more. "
-    "Every user message describing a new edit (blur, rotate, flip, noise) is a "
+    "Every user message describing a new edit (blur, rotate, flip, noise, crop) is a "
     "NEW request that requires a NEW call to process_region — even if a previous "
     "turn already did something similar. Never respond with confirmation text "
     "without first calling the appropriate tool for the CURRENT message. "
     "For whole-image transformations such as blur, rotate, flip, or noise, "
     "call process_region directly and omit the box argument. "
+    "crop is the one exception: it ALWAYS requires a box (never omit it), "
+    "since cropping replaces the whole image with just that region rather "
+    "than applying an effect within the current canvas. "
     "Use detect_objects or get_detections only when the user asks about objects "
     "or requests an edit to a specific object or region. "
     "When the user refers to an object by position (e.g. 'leftmost', 'middle', "
@@ -280,8 +283,10 @@ async def _apply_mcp_transform(tool_name: str, region_b64: str, params: dict) ->
 @tool
 async def process_region(tool_name: str, box: list | str | None = None, blur_radius: float = 3.0, angle: float = 90.0, direction: str = "horizontal") -> str:
     """Apply an image transformation to a specific region of the user's image and composite it back.
-    - tool_name: one of "blur", "rotate", "flip", "add_noise"
-    - box: optional [x1, y1, x2, y2] coordinates; omit it to process the entire image
+    - tool_name: one of "blur", "rotate", "flip", "add_noise", "crop"
+    - box: [x1, y1, x2, y2] coordinates. Optional for blur/rotate/flip/add_noise
+      (omit to process the entire image). REQUIRED for crop -- crop always
+      replaces the whole image with just this region, it cannot be omitted.
     - blur_radius: used when tool_name is "blur" (default 3.0)
     - angle: used when tool_name is "rotate". Positive angle = counter-clockwise
       ("rotate left"), negative angle = clockwise ("rotate right"). For example,
@@ -337,6 +342,21 @@ async def process_region(tool_name: str, box: list | str | None = None, blur_rad
 
         if x2 <= x1 or y2 <= y1:
             return json.dumps({"error": "The provided box is invalid."})
+
+    if tool_name == "crop":
+        # Crop is fundamentally different from the other tools: it doesn't
+        # transform a sub-region and paste it back -- it REPLACES the whole
+        # canvas with just this region, so the output image is a different
+        # size. Skip the local-crop + MCP-call + paste-back pipeline the
+        # other tools use and call the MCP crop tool directly on the full
+        # image instead.
+        if box is None:
+            return json.dumps({"error": "crop requires a box: [x1, y1, x2, y2] specifying the region to keep."})
+        cropped_b64 = await _apply_mcp_transform(
+            "crop", image_b64, {"left": x1, "upper": y1, "right": x2, "lower": y2}
+        )
+        _get_holder()["result_image_b64"] = cropped_b64
+        return json.dumps({"status": "ok", "message": "Cropped the image to the specified region."})
 
     region = full.crop((x1, y1, x2, y2))
 

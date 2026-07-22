@@ -273,3 +273,112 @@ def test_agent_node_does_not_mark_tool_called_on_plain_text():
     node = build_agent_node(fake_llm, "system prompt")
     result = run(node(make_state()))
     assert "tool_called_this_turn" not in result
+
+
+
+# --- Regression tests: every tool_use must get a tool_result, or providers
+# like Bedrock Converse 500 on the NEXT LLM call. Discovered via a real
+# "crop the top-left quarter" request that crashed in production testing --
+# route_after_agent redirected process_region to run_detection (since no
+# valid detections existed yet), and run_detection_node silently dropped
+# the process_region tool_call instead of acknowledging it.
+
+def test_run_detection_node_responds_to_deferred_process_region_call():
+    detect_tool = MagicMock(name="detect_objects")
+    detect_tool.name = "detect_objects"
+    detect_tool.ainvoke = AsyncMock(return_value=MagicMock(content='{"detections": []}', tool_call_id="d1"))
+    get_det_tool = MagicMock(name="get_detections")
+    get_det_tool.name = "get_detections"
+
+    fake_s3 = FakeS3()
+    fake_s3.store["orig.png"] = b"fake-bytes"
+
+    from graph import build_run_detection_node
+    node = build_run_detection_node(detect_tool, get_det_tool, fake_s3, "bucket", __import__("contextvars").ContextVar("v", default=None))
+
+    calls = [
+        tool_call("detect_objects", call_id="d1"),
+        tool_call("process_region", {"tool_name": "crop", "box": [0, 0, 10, 10]}, call_id="p1"),
+    ]
+    state = make_state(messages=[msg_with_calls(calls)], image_key="orig.png")
+    result = run(node(state))
+
+    tool_call_ids_responded = {m.tool_call_id for m in result["messages"]}
+    assert "d1" in tool_call_ids_responded
+    assert "p1" in tool_call_ids_responded  # the deferred call must NOT be dropped
+
+
+def test_run_img_proc_node_responds_to_deferred_extra_call():
+    process_region_tool = MagicMock(name="process_region")
+    process_region_tool.name = "process_region"
+    process_region_tool.ainvoke = AsyncMock(return_value=MagicMock(content="ok", tool_call_id="p1"))
+    show_tool = MagicMock(name="show_current_image")
+    show_tool.name = "show_current_image"
+
+    fake_s3 = FakeS3()
+    fake_s3.store["orig.png"] = b"fake-bytes"
+
+    from graph import build_run_img_proc_node
+    node = build_run_img_proc_node(
+        process_region_tool, show_tool, fake_s3, "bucket",
+        __import__("contextvars").ContextVar("v", default=None), lambda: {},
+    )
+
+    calls = [
+        tool_call("process_region", {"tool_name": "blur"}, call_id="p1"),
+        tool_call("undo_edit", call_id="u1"),
+    ]
+    state = make_state(messages=[msg_with_calls(calls)], image_key="orig.png")
+    result = run(node(state))
+
+    tool_call_ids_responded = {m.tool_call_id for m in result["messages"]}
+    assert "p1" in tool_call_ids_responded
+    assert "u1" in tool_call_ids_responded
+
+
+def test_run_undo_node_responds_to_deferred_extra_call():
+    from graph import build_run_undo_node
+    node = build_run_undo_node()
+    calls = [
+        tool_call("undo_edit", call_id="u1"),
+        tool_call("process_region", {"tool_name": "blur"}, call_id="p1"),
+    ]
+    state = make_state(messages=[msg_with_calls(calls)], processed_keys=["k1"])
+    result = run(node(state))
+
+    tool_call_ids_responded = {m.tool_call_id for m in result["messages"]}
+    assert "u1" in tool_call_ids_responded
+    assert "p1" in tool_call_ids_responded
+
+
+def test_await_confirm_decline_responds_to_process_region_itself(monkeypatch):
+    from graph import build_await_confirm_node
+    import graph as graph_module
+    monkeypatch.setattr(graph_module, "interrupt", lambda payload: False)  # simulate decline
+
+    node = build_await_confirm_node()
+    calls = [tool_call("process_region", {"tool_name": "blur", "box": [1, 2, 3, 4]}, call_id="p1")]
+    state = make_state(messages=[msg_with_calls(calls)])
+    result = run(node(state))
+
+    tool_call_ids_responded = {m.tool_call_id for m in result["messages"]}
+    assert "p1" in tool_call_ids_responded  # must respond even on decline
+    assert result["pending_edit"] is None
+
+
+def test_await_confirm_confirm_responds_to_extra_deferred_call(monkeypatch):
+    from graph import build_await_confirm_node
+    import graph as graph_module
+    monkeypatch.setattr(graph_module, "interrupt", lambda payload: True)  # simulate confirm
+
+    node = build_await_confirm_node()
+    calls = [
+        tool_call("process_region", {"tool_name": "blur", "box": [1, 2, 3, 4]}, call_id="p1"),
+        tool_call("undo_edit", call_id="u1"),
+    ]
+    state = make_state(messages=[msg_with_calls(calls)])
+    result = run(node(state))
+
+    tool_call_ids_responded = {m.tool_call_id for m in result["messages"]}
+    assert "u1" in tool_call_ids_responded  # extra call acknowledged
+    assert result["pending_edit"]["tool_call_id"] == "p1"
