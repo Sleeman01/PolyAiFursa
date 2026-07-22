@@ -34,6 +34,7 @@ services:
 
   agent:
     image: sleemaneketeh/agent:${AGENT_TAG:-latest}
+    pull_policy: build
     build: ./services/agent
     environment:
       - YOLO_SERVICE_URL=http://yolo:8080
@@ -61,6 +62,7 @@ services:
 
   frontend:
     image: sleemaneketeh/frontend:${FRONTEND_TAG:-latest}
+    pull_policy: build
     build:
       context: ./services/frontend
       args:
