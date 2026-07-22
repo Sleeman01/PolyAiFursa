@@ -6,9 +6,12 @@ Exposes tools to query:
   - metrics from Prometheus (dev/prod)
 
 Runs over stdio, spawned directly by an MCP client (e.g. VS Code Copilot
-Chat via .vscode/mcp.json) - not a network service.
+Chat via .vscode/mcp.json, or Claude Code via .mcp.json) - not a network
+service.
 
-Environment variables (see .vscode/mcp.json):
+Configuration is read from services/observability-mcp/.env (see
+.env.example for the template - copy it to .env and fill in real values,
+.env is gitignored):
   DEV_PROMETHEUS_URL, PROD_PROMETHEUS_URL   - e.g. http://<ec2-ip>:9090
   DEV_S3_LOGS_BUCKET, PROD_S3_LOGS_BUCKET   - S3 bucket holding Fluent Bit output
   AWS_REGION                                - e.g. us-east-1
@@ -31,11 +34,15 @@ import io
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import boto3
 import paramiko
 import requests
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 mcp = FastMCP("observability")
 
