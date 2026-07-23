@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sleeman-polyai-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Sleeman01/PolyAiFursa.git
+    targetRevision: dev
+    path: infra/k8s/dev
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

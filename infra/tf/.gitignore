@@ -1,0 +1,7 @@
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfstate.d/
+*.tfplan
+modules/k8s-cluster/lambda/package/
+modules/k8s-cluster/lambda/node_drain.zip

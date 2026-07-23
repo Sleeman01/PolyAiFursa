@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euxo pipefail
+
+# Only relevant if this node is already an initialized control plane
+if [ ! -f /etc/kubernetes/pki/apiserver.crt ]; then
+  exit 0
+fi
+
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+CURRENT_PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+
+if [ -z "$CURRENT_PUBLIC_IP" ]; then
+  exit 0
+fi
+
+if openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -q "$CURRENT_PUBLIC_IP"; then
+  echo "Cert already covers current public IP ($CURRENT_PUBLIC_IP) - nothing to do"
+  exit 0
+fi
+
+echo "Public IP changed to $CURRENT_PUBLIC_IP - regenerating API server certificate"
+
+kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' > /tmp/kubeadm-config.yaml
+
+python3 -c "
+import re
+with open('/tmp/kubeadm-config.yaml') as f:
+    c = f.read()
+c = re.sub(r'^apiServer:\n', 'apiServer:\n  certSANs:\n  - \"$CURRENT_PUBLIC_IP\"\n', c, count=1, flags=re.MULTILINE)
+with open('/tmp/kubeadm-config.yaml', 'w') as f:
+    f.write(c)
+"
+
+mv /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.crt.bak.$(date +%s)
+mv /etc/kubernetes/pki/apiserver.key /etc/kubernetes/pki/apiserver.key.bak.$(date +%s)
+kubeadm init phase certs apiserver --config /tmp/kubeadm-config.yaml
+
+mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
+sleep 5
+mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
+sleep 10
+
+echo "Certificate refreshed for public IP $CURRENT_PUBLIC_IP"
