@@ -33,6 +33,14 @@ jobs:
           aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           CREDS
 
+      - name: Build Lambda deployment package
+        run: |
+          cd infra/tf/modules/k8s-cluster/lambda
+          pip install paramiko -t package --quiet
+          cp node_drain.py package/
+          cd package
+          zip -r ../node_drain.zip . -x "*.pyc" > /dev/null
+
       - name: Terraform Init
         working-directory: infra/tf
         run: terraform init
