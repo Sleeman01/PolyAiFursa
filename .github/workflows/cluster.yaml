@@ -1,0 +1,114 @@
+name: Provision and Bootstrap K8s Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'AWS region to provision the cluster in'
+        required: true
+        default: 'us-east-1'
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane_ip: ${{ steps.tf_output.outputs.control_plane_ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+
+      - name: Configure AWS credentials
+        run: |
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials << CREDS
+          [default]
+          aws_access_key_id = ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          CREDS
+
+      - name: Terraform Init
+        working-directory: infra/tf
+        run: terraform init
+
+      - name: Select or create workspace
+        working-directory: infra/tf
+        run: terraform workspace select -or-create ${{ inputs.region }}
+
+      - name: Terraform Apply
+        working-directory: infra/tf
+        run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars"
+
+      - name: Get control plane IP
+        id: tf_output
+        working-directory: infra/tf
+        run: echo "control_plane_ip=$(terraform output -raw control_plane_public_ip)" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    needs: provision
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.K8S_CLUSTER_SSH_KEY }}" > ~/.ssh/cluster_key.pem
+          chmod 400 ~/.ssh/cluster_key.pem
+
+      - name: Wait for control plane to be reachable
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cluster_key.pem \
+              ubuntu@${{ needs.provision.outputs.control_plane_ip }} "echo ok" 2>/dev/null; then
+              echo "Control plane is reachable"
+              exit 0
+            fi
+            echo "Waiting for control plane SSH..."
+            sleep 20
+          done
+          echo "Control plane never became reachable"
+          exit 1
+
+      - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, ArgoCD Applications)
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
+          set -euxo pipefail
+
+          # Calico CNI (idempotent - kubectl apply is safe to re-run)
+          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+
+          # ArgoCD (idempotent, server-side apply avoids annotation-size issue)
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
+
+          # dev/prod namespaces
+          kubectl create namespace dev --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
+
+          # EBS CSI driver (idempotent)
+          kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.35"
+
+          echo "Bootstrap complete"
+          REMOTE_SCRIPT
+
+      - uses: actions/checkout@v4
+
+      - name: Apply ArgoCD Applications
+        run: |
+          for i in $(seq 1 20); do
+            if scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+              infra/argocd/app-dev.yaml infra/argocd/app-prod.yaml \
+              ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/ 2>/dev/null; then
+              break
+            fi
+            sleep 10
+          done
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
+            "kubectl apply -f /tmp/app-dev.yaml -f /tmp/app-prod.yaml"
