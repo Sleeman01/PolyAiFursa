@@ -68,18 +68,19 @@ jobs:
           echo "${{ secrets.K8S_CLUSTER_SSH_KEY }}" > ~/.ssh/cluster_key.pem
           chmod 400 ~/.ssh/cluster_key.pem
 
-      - name: Wait for control plane to be reachable
+      - name: Wait for control plane to finish bootstrapping
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do
             if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cluster_key.pem \
-              ubuntu@${{ needs.provision.outputs.control_plane_ip }} "echo ok" 2>/dev/null; then
-              echo "Control plane is reachable"
+              ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
+              "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes" 2>/dev/null; then
+              echo "Control plane is up and kubectl is working"
               exit 0
             fi
-            echo "Waiting for control plane SSH..."
+            echo "Waiting for control plane to finish initializing (attempt $i/45)..."
             sleep 20
           done
-          echo "Control plane never became reachable"
+          echo "Control plane never became ready"
           exit 1
 
       - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, ArgoCD Applications)
@@ -87,6 +88,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
           set -euxo pipefail
+          export KUBECONFIG=/etc/kubernetes/admin.conf
 
           # Calico CNI (idempotent - kubectl apply is safe to re-run)
           kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
