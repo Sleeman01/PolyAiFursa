@@ -12,6 +12,3 @@ spec:
   resources:
     requests:
       storage: 5Gi
-  selector:
-    matchLabels:
-      pv: prometheus-pv-dev
