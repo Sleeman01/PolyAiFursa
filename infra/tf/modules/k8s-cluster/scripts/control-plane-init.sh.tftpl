@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euxo pipefail
 
+# --- install AWS CLI early, then clear any stale join-command from a previous cluster ---
+apt-get update
+apt-get install -y unzip curl
+if ! command -v aws &> /dev/null; then
+  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+  unzip -q awscliv2.zip
+  ./aws/install
+fi
+aws ssm delete-parameter --region ${region} --name "/sleeman/${cluster_name}/join-command" 2>/dev/null || true
+
 # --- disable swap (required by kubelet) ---
 swapoff -a
 sed -i '/ swap / s/^/#/' /etc/fstab
@@ -67,12 +77,6 @@ AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest
 NODE_NAME=$(hostname)
 kubectl --kubeconfig=/etc/kubernetes/admin.conf label node "$NODE_NAME" topology.kubernetes.io/zone="$AZ" topology.kubernetes.io/region=${region} --overwrite
 
-# --- install AWS CLI (to publish join command to SSM) ---
-if ! command -v aws &> /dev/null; then
-  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  unzip -q awscliv2.zip
-  ./aws/install
-fi
 
 # --- store join command for worker nodes ---
 kubeadm token create --print-join-command > /tmp/join-command.sh
