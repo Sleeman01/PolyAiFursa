@@ -1,6 +1,12 @@
 terraform {
   required_version = ">= 1.5.0"
 
+  backend "s3" {
+    bucket = "sleeman-polyai-k8s-tfstate"
+    key    = "k8s-cluster/terraform.tfstate"
+    region = "us-east-1"
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
