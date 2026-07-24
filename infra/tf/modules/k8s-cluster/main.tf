@@ -204,6 +204,11 @@ resource "aws_iam_role" "lambda_role" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
+resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
 resource "aws_iam_role_policy" "lambda_policy" {
   name = "sleeman-${var.cluster_name}-lambda-policy"
   role = aws_iam_role.lambda_role.id
@@ -236,6 +241,24 @@ resource "aws_iam_role_policy" "lambda_policy" {
 }
 
 # --- Lambda function ---
+resource "aws_security_group" "lambda_sg" {
+  name        = "sleeman-${var.cluster_name}-lambda-sg"
+  description = "Allow Lambda to reach control plane over SSH"
+  vpc_id      = var.vpc_id
+
+  egress {
+    description = "All outbound (SSH to control plane, AWS API calls)"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "sleeman-${var.cluster_name}-lambda-sg"
+  }
+}
+
 resource "aws_lambda_function" "node_drain" {
   function_name = "sleeman-${var.cluster_name}-node-drain"
   role          = aws_iam_role.lambda_role.arn
@@ -244,6 +267,11 @@ resource "aws_lambda_function" "node_drain" {
   timeout       = 30
   filename      = "${path.module}/lambda/node_drain.zip"
   source_code_hash = filebase64sha256("${path.module}/lambda/node_drain.zip")
+
+  vpc_config {
+    subnet_ids         = var.public_subnet_ids
+    security_group_ids = [aws_security_group.lambda_sg.id]
+  }
 
   environment {
     variables = {
