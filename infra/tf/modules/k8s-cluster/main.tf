@@ -264,7 +264,7 @@ resource "aws_lambda_function" "node_drain" {
   role          = aws_iam_role.lambda_role.arn
   handler       = "node_drain.handler"
   runtime       = "python3.12"
-  timeout       = 30
+  timeout       = 60
   filename      = "${path.module}/lambda/node_drain.zip"
   source_code_hash = filebase64sha256("${path.module}/lambda/node_drain.zip")
 
@@ -333,7 +333,7 @@ resource "aws_autoscaling_lifecycle_hook" "drain_on_terminate" {
   autoscaling_group_name = aws_autoscaling_group.workers.name
   lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
   default_result         = "CONTINUE"
-  heartbeat_timeout      = 60
+  heartbeat_timeout      = 120
   notification_target_arn = aws_sns_topic.lifecycle_topic.arn
   role_arn               = aws_iam_role.asg_lifecycle_role.arn
 }
