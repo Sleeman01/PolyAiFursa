@@ -63,9 +63,22 @@ if [ ! -f /etc/kubernetes/kubelet.conf ]; then
       --with-decryption \
       --query "Parameter.Value" \
       --output text 2>/dev/null || true)
+
     if [ -n "$JOIN_CMD" ]; then
-      break
+      # Verify we can actually reach the control plane's API port before trusting this join command
+      # (guards against a stale value from a previous cluster incarnation)
+      CP_ADDR=$(echo "$JOIN_CMD" | awk '{print $3}')
+      CP_HOST=$(echo "$CP_ADDR" | cut -d: -f1)
+      CP_PORT=$(echo "$CP_ADDR" | cut -d: -f2)
+      if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$CP_HOST/$CP_PORT" 2>/dev/null; then
+        echo "Control plane at $CP_ADDR is reachable, proceeding with join"
+        break
+      else
+        echo "Join command points to $CP_ADDR but it is not reachable yet (likely a stale value) - retrying"
+        JOIN_CMD=""
+      fi
     fi
+
     echo "Waiting for control plane join command in SSM..."
     sleep 20
   done
