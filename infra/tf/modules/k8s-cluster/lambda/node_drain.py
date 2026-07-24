@@ -6,7 +6,7 @@ import io
 
 REGION = os.environ["AWS_REGION"]
 SECRET_NAME = os.environ["SSH_SECRET_NAME"]
-CP_PRIVATE_IP = os.environ["CONTROL_PLANE_PRIVATE_IP"]
+CP_PUBLIC_IP = os.environ["CONTROL_PLANE_PUBLIC_IP"]
 
 asg_client = boto3.client("autoscaling", region_name=REGION)
 secrets_client = boto3.client("secretsmanager", region_name=REGION)
@@ -28,7 +28,7 @@ def delete_node(node_name):
     key = get_ssh_key()
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(CP_PRIVATE_IP, username="ubuntu", pkey=key, timeout=15)
+    ssh.connect(CP_PUBLIC_IP, username="ubuntu", pkey=key, timeout=15)
     cmd = f"sudo kubectl delete node {node_name} --ignore-not-found"
     stdin, stdout, stderr = ssh.exec_command(cmd)
     exit_status = stdout.channel.recv_exit_status()
