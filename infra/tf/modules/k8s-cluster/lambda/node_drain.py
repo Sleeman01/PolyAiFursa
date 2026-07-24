@@ -31,7 +31,7 @@ def delete_node(node_name):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(CP_PUBLIC_IP, username="ubuntu", pkey=key, timeout=15)
-    cmd = f"sudo kubectl delete node {node_name} --ignore-not-found"
+    cmd = f"sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf delete node {node_name} --ignore-not-found"
     stdin, stdout, stderr = ssh.exec_command(cmd)
     exit_status = stdout.channel.recv_exit_status()
     out = stdout.read().decode()
