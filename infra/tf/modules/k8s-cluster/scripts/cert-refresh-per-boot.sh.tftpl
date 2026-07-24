@@ -23,12 +23,15 @@ echo "Public IP changed to $CURRENT_PUBLIC_IP - regenerating API server certific
 kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' > /tmp/kubeadm-config.yaml
 
 python3 -c "
-import re
+import yaml
 with open('/tmp/kubeadm-config.yaml') as f:
-    c = f.read()
-c = re.sub(r'^apiServer:\n', 'apiServer:\n  certSANs:\n  - \"$CURRENT_PUBLIC_IP\"\n', c, count=1, flags=re.MULTILINE)
+    c = yaml.safe_load(f)
+api_server = c.setdefault('apiServer', {})
+sans = set(api_server.get('certSANs', []))
+sans.add('$CURRENT_PUBLIC_IP')
+api_server['certSANs'] = sorted(sans)
 with open('/tmp/kubeadm-config.yaml', 'w') as f:
-    f.write(c)
+    yaml.safe_dump(c, f)
 "
 
 mv /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.crt.bak.$(date +%s)
