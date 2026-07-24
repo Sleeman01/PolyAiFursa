@@ -19,9 +19,11 @@ def get_ssh_key():
 
 
 def get_node_name(instance_id):
-    # kubeadm nodes are named after the private DNS hostname
+    # kubeadm registers nodes using the bare hostname (no domain suffix),
+    # while EC2's PrivateDnsName includes ".ec2.internal" - strip it.
     resp = ec2_client.describe_instances(InstanceIds=[instance_id])
-    return resp["Reservations"][0]["Instances"][0]["PrivateDnsName"]
+    private_dns = resp["Reservations"][0]["Instances"][0]["PrivateDnsName"]
+    return private_dns.split(".")[0]
 
 
 def delete_node(node_name):
@@ -32,7 +34,10 @@ def delete_node(node_name):
     cmd = f"sudo kubectl delete node {node_name} --ignore-not-found"
     stdin, stdout, stderr = ssh.exec_command(cmd)
     exit_status = stdout.channel.recv_exit_status()
+    out = stdout.read().decode()
+    err = stderr.read().decode()
     ssh.close()
+    print(f"Deleted node '{node_name}': exit={exit_status} stdout={out!r} stderr={err!r}")
     return exit_status
 
 
