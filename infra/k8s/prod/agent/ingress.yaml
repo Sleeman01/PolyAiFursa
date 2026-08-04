@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent
+  labels:
+    app: agent
+    env: prod
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: sleeman01.fursa.click
+      http:
+        paths:
+          - path: /prod/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: agent
+                port:
+                  number: 8000

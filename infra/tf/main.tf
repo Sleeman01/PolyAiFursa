@@ -4,6 +4,7 @@ terraform {
   backend "s3" {
     bucket = "sleeman-polyai-k8s-tfstate"
     key    = "k8s-cluster/terraform.tfstate"
+    use_lockfile = true
     region = "us-east-1"
   }
 

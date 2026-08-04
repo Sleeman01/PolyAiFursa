@@ -72,6 +72,10 @@ resource "aws_security_group" "cluster_sg" {
   tags = {
     Name = "sleeman-${var.cluster_name}-sg"
   }
+
+  lifecycle {
+    ignore_changes = [ingress]
+  }
 }
 
 data "aws_ami" "ubuntu" {
