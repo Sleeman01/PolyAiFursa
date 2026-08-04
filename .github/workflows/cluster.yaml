@@ -83,7 +83,7 @@ jobs:
           echo "Control plane never became ready"
           exit 1
 
-      - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, ArgoCD Applications)
+      - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, Ingress, ArgoCD Applications)
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
@@ -103,6 +103,24 @@ jobs:
 
           # EBS CSI driver (idempotent)
           kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.35"
+
+          # Nginx Ingress Controller — baremetal provider (idempotent)
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.2/deploy/static/provider/baremetal/deploy.yaml
+
+          # Wait for the controller Service to exist before patching it
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=Available deployment/ingress-nginx-controller \
+            --timeout=180s
+
+          # Pin NodePorts to fixed values so the ALB Target Group config is stable
+          kubectl patch svc ingress-nginx-controller -n ingress-nginx --type merge -p '{
+            "spec": {
+              "ports": [
+                {"name":"http","port":80,"protocol":"TCP","targetPort":"http","nodePort":30080},
+                {"name":"https","port":443,"protocol":"TCP","targetPort":"https","nodePort":30443}
+              ]
+            }
+          }'
 
           echo "Bootstrap complete"
           REMOTE_SCRIPT

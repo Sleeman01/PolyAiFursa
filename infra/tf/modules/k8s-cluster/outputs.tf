@@ -13,3 +13,7 @@ output "control_plane_instance_id" {
 output "asg_name" {
   value = aws_autoscaling_group.workers.name
 }
+
+output "cluster_sg_id" {
+  value = aws_security_group.cluster_sg.id
+}

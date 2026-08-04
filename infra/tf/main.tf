@@ -29,7 +29,9 @@ module "vpc" {
   azs             = ["${var.region}a", "${var.region}b"]
   public_subnets  = ["10.0.1.0/24", "10.0.2.0/24"]
 
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = true 
+  
+
 
   enable_dns_hostnames = true
   enable_dns_support   = true
@@ -47,4 +49,18 @@ module "k8s_cluster" {
   public_subnet_ids  = module.vpc.public_subnets
   instance_key_name  = var.instance_key_name
   region             = var.region
+}
+
+module "ingress" {
+  source = "./modules/ingress"
+
+  vpc_id            = module.vpc.vpc_id
+  public_subnet_ids = module.vpc.public_subnets
+  worker_asg_name   = module.k8s_cluster.asg_name
+  cluster_sg_id     = module.k8s_cluster.cluster_sg_id
+
+  domain_name       = "sleeman01.fursa.click"
+  hosted_zone_name  = "fursa.click"
+  ingress_node_port = 30080
+  name_prefix       = "sleeman-${var.cluster_name}"
 }
