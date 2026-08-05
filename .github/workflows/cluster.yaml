@@ -113,14 +113,35 @@ jobs:
             --timeout=180s
 
           # Pin NodePorts to fixed values so the ALB Target Group config is stable
+          # (also adds the metrics port here, since a merge-type patch replaces the whole ports list)
           kubectl patch svc ingress-nginx-controller -n ingress-nginx --type merge -p '{
             "spec": {
               "ports": [
                 {"name":"http","port":80,"protocol":"TCP","targetPort":"http","nodePort":30080},
-                {"name":"https","port":443,"protocol":"TCP","targetPort":"https","nodePort":30443}
+                {"name":"https","port":443,"protocol":"TCP","targetPort":"https","nodePort":30443},
+                {"name":"metrics","port":10254,"protocol":"TCP","targetPort":"metrics"}
               ]
             }
           }'
+
+          # The baremetal manifest ships with metrics explicitly disabled and no metrics
+          # container port; enable both so Prometheus can scrape the controller
+          kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type='json' -p='[
+            {"op":"replace","path":"/spec/template/spec/containers/0/args","value":[
+              "/nginx-ingress-controller",
+              "--election-id=ingress-nginx-leader",
+              "--controller-class=k8s.io/ingress-nginx",
+              "--ingress-class=nginx",
+              "--configmap=$(POD_NAMESPACE)/ingress-nginx-controller",
+              "--validating-webhook=:8443",
+              "--validating-webhook-certificate=/usr/local/certificates/cert",
+              "--validating-webhook-key=/usr/local/certificates/key",
+              "--enable-metrics=true"
+            ]},
+            {"op":"add","path":"/spec/template/spec/containers/0/ports/-","value":{"name":"metrics","containerPort":10254,"protocol":"TCP"}}
+          ]'
+
+          kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=180s
 
           # metrics-server (idempotent) — required for CPU-based HPAs to compute replica counts
           kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
