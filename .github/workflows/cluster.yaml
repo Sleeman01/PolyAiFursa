@@ -122,6 +122,18 @@ jobs:
             }
           }'
 
+          # metrics-server (idempotent) — required for CPU-based HPAs to compute replica counts
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+
+          # kubeadm clusters don't issue kubelet serving certs signed by a CA metrics-server trusts,
+          # so its default kubelet TLS verification fails; skip verification (acceptable for this course project)
+          kubectl patch deployment metrics-server -n kube-system --type='json' \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+          kubectl wait --namespace kube-system \
+            --for=condition=Available deployment/metrics-server \
+            --timeout=180s
+
           echo "Bootstrap complete"
           REMOTE_SCRIPT
 
