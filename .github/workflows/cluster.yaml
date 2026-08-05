@@ -152,3 +152,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
             "kubectl apply -f /tmp/app-dev.yaml -f /tmp/app-prod.yaml"
+
+          # prod tracks main via a manual promotion gate (no automated syncPolicy, by design),
+          # so unlike dev it never syncs itself; trigger one explicit sync here so a full
+          # rebuild comes up clean without a human clicking sync in the UI
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
+            "kubectl patch application sleeman-polyai-prod -n argocd --type merge -p '{\"operation\":{\"sync\":{}}}'"
