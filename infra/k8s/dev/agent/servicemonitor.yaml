@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agent
+  labels:
+    app: agent
+    env: dev
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: agent
+      env: dev
+  namespaceSelector:
+    matchNames:
+      - dev
+  endpoints:
+    - targetPort: 8000
+      path: /metrics
+      interval: 30s

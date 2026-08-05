@@ -51,7 +51,7 @@ jobs:
 
       - name: Terraform Apply
         working-directory: infra/tf
-        run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars"
+        run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars" -var="alert_email=${{ secrets.ALERT_EMAIL }}"
 
       - name: Get control plane IP
         id: tf_output
@@ -113,19 +113,76 @@ jobs:
             --timeout=180s
 
           # Pin NodePorts to fixed values so the ALB Target Group config is stable
+          # (also adds the metrics port here, since a merge-type patch replaces the whole ports list)
           kubectl patch svc ingress-nginx-controller -n ingress-nginx --type merge -p '{
             "spec": {
               "ports": [
                 {"name":"http","port":80,"protocol":"TCP","targetPort":"http","nodePort":30080},
-                {"name":"https","port":443,"protocol":"TCP","targetPort":"https","nodePort":30443}
+                {"name":"https","port":443,"protocol":"TCP","targetPort":"https","nodePort":30443},
+                {"name":"metrics","port":10254,"protocol":"TCP","targetPort":"metrics"}
               ]
             }
           }'
+
+          # The baremetal manifest ships with metrics explicitly disabled and no metrics
+          # container port; enable both so Prometheus can scrape the controller
+          kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type='json' -p='[
+            {"op":"replace","path":"/spec/template/spec/containers/0/args","value":[
+              "/nginx-ingress-controller",
+              "--election-id=ingress-nginx-leader",
+              "--controller-class=k8s.io/ingress-nginx",
+              "--ingress-class=nginx",
+              "--configmap=$(POD_NAMESPACE)/ingress-nginx-controller",
+              "--validating-webhook=:8443",
+              "--validating-webhook-certificate=/usr/local/certificates/cert",
+              "--validating-webhook-key=/usr/local/certificates/key",
+              "--enable-metrics=true"
+            ]},
+            {"op":"add","path":"/spec/template/spec/containers/0/ports/-","value":{"name":"metrics","containerPort":10254,"protocol":"TCP"}}
+          ]'
+
+          kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=180s
+
+          # metrics-server (idempotent) — required for CPU-based HPAs to compute replica counts
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+
+          # kubeadm clusters don't issue kubelet serving certs signed by a CA metrics-server trusts,
+          # so its default kubelet TLS verification fails; skip verification (acceptable for this course project)
+          kubectl patch deployment metrics-server -n kube-system --type='json' \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+          kubectl wait --namespace kube-system \
+            --for=condition=Available deployment/metrics-server \
+            --timeout=180s
 
           echo "Bootstrap complete"
           REMOTE_SCRIPT
 
       - uses: actions/checkout@v4
+
+      - name: Install kube-prometheus-stack
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            infra/k8s/monitoring/values.yaml \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/monitoring-values.yaml
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
+          set -euxo pipefail
+          export KUBECONFIG=/home/ubuntu/.kube/config
+
+          if ! command -v helm &> /dev/null; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          fi
+
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+          helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+            --version 88.1.5 \
+            --namespace monitoring --create-namespace \
+            -f /tmp/monitoring-values.yaml \
+            --wait --timeout 5m
+          REMOTE_SCRIPT
 
       - name: Apply ArgoCD Applications
         run: |
@@ -140,3 +197,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
             "kubectl apply -f /tmp/app-dev.yaml -f /tmp/app-prod.yaml"
+
+          # prod tracks main via a manual promotion gate (no automated syncPolicy, by design),
+          # so unlike dev it never syncs itself; trigger one explicit sync here so a full
+          # rebuild comes up clean without a human clicking sync in the UI
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }} \
+            "kubectl patch application sleeman-polyai-prod -n argocd --type merge -p '{\"operation\":{\"sync\":{}}}'"

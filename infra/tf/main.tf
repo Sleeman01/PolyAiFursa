@@ -4,6 +4,7 @@ terraform {
   backend "s3" {
     bucket = "sleeman-polyai-k8s-tfstate"
     key    = "k8s-cluster/terraform.tfstate"
+    use_lockfile = true
     region = "us-east-1"
   }
 
@@ -49,6 +50,7 @@ module "k8s_cluster" {
   public_subnet_ids  = module.vpc.public_subnets
   instance_key_name  = var.instance_key_name
   region             = var.region
+  alert_email        = var.alert_email
 }
 
 module "ingress" {

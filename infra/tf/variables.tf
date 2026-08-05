@@ -13,3 +13,8 @@ variable "instance_key_name" {
   description = "EC2 key pair name for SSH access"
   type        = string
 }
+
+variable "alert_email" {
+  description = "Email address to subscribe to cluster alert notifications"
+  type        = string
+}

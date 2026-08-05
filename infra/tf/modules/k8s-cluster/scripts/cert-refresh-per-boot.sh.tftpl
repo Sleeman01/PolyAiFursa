@@ -6,6 +6,14 @@ if [ ! -f /etc/kubernetes/pki/apiserver.crt ]; then
   exit 0
 fi
 
+# Wait for kube-apiserver to actually be listening (kubelet/crio startup lags cloud-init's boot stage)
+for i in $(seq 1 60); do
+  if curl -sk --max-time 2 https://127.0.0.1:6443/healthz >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 CURRENT_PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
 

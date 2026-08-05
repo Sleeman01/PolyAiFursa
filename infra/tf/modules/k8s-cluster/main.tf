@@ -72,6 +72,10 @@ resource "aws_security_group" "cluster_sg" {
   tags = {
     Name = "sleeman-${var.cluster_name}-sg"
   }
+
+  lifecycle {
+    ignore_changes = [ingress]
+  }
 }
 
 data "aws_ami" "ubuntu" {
@@ -118,6 +122,16 @@ resource "aws_instance" "control_plane" {
     volume_type = "gp3"
   }
 
+  # http_put_response_hop_limit must be >=2 for pods (not just the host) to
+  # reach IMDS - the pod network adds a hop beyond direct host access, and
+  # the AWS default of 1 causes IMDSv2 token requests from pods to silently
+  # time out (discovered via Alertmanager's SNS credential fetch failing)
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2
+    http_tokens                 = "optional"
+  }
+
   user_data = templatefile("${path.module}/scripts/control-plane-init.sh.tftpl", {
     region              = var.region
     cluster_name        = var.cluster_name
@@ -150,6 +164,13 @@ resource "aws_launch_template" "worker" {
     }
   }
 
+  # See aws_instance.control_plane above for why hop_limit=2 is required
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2
+    http_tokens                 = "optional"
+  }
+
   user_data = base64encode(templatefile("${path.module}/scripts/worker-init.sh.tftpl", {
     region       = var.region
     cluster_name = var.cluster_name
@@ -169,7 +190,7 @@ resource "aws_autoscaling_group" "workers" {
   vpc_zone_identifier = var.public_subnet_ids
   min_size            = 1
   max_size            = 3
-  desired_capacity    = 1
+  desired_capacity    = 2
 
   launch_template {
     id      = aws_launch_template.worker.id
@@ -186,6 +207,36 @@ resource "aws_autoscaling_group" "workers" {
 # --- SNS topic for ASG lifecycle events ---
 resource "aws_sns_topic" "lifecycle_topic" {
   name = "sleeman-${var.cluster_name}-lifecycle-topic"
+}
+
+# --- SNS topic for Alertmanager notifications ---
+resource "aws_sns_topic" "alerts_topic" {
+  name = "sleeman-${var.cluster_name}-alerts-topic"
+}
+
+resource "aws_sns_topic_subscription" "alerts_email" {
+  topic_arn = aws_sns_topic.alerts_topic.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+# --- Allow cluster nodes to publish to the alerts topic. No IRSA on this
+# self-managed cluster; Alertmanager's sigv4 auth falls back to the
+# instance's IAM role via node_role/node_profile. ---
+resource "aws_iam_role_policy" "node_sns_publish" {
+  name = "sleeman-${var.cluster_name}-node-sns-publish"
+  role = aws_iam_role.node_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = aws_sns_topic.alerts_topic.arn
+      }
+    ]
+  })
 }
 
 # --- IAM role for Lambda ---

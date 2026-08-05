@@ -17,3 +17,7 @@ output "asg_name" {
 output "cluster_sg_id" {
   value = aws_security_group.cluster_sg.id
 }
+
+output "alerts_topic_arn" {
+  value = aws_sns_topic.alerts_topic.arn
+}

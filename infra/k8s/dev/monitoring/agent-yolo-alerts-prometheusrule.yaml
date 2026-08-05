@@ -1,0 +1,37 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agent-yolo-alerts
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: agent-yolo.rules
+      rules:
+        - alert: AgentChatHighLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(agent_chat_request_latency_seconds_bucket{job="agent"}[5m])) by (le)) > 30
+          for: 5m
+          labels:
+            severity: warning
+            namespace: dev
+          annotations:
+            summary: "Agent /chat p95 latency is high"
+            description: "p95 latency for agent chat requests has exceeded 30s over the last 5m."
+        - alert: YoloHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{job="yolo", status=~"5xx"}[5m]))
+              /
+              sum(rate(http_requests_total{job="yolo"}[5m]))
+            ) > 0.1
+            and
+            sum(rate(http_requests_total{job="yolo"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: critical
+            namespace: dev
+          annotations:
+            summary: "Yolo service error rate is high"
+            description: "More than 10% of yolo requests have returned 5xx over the last 5m."
