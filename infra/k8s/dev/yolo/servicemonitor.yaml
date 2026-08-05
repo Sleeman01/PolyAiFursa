@@ -4,16 +4,15 @@ metadata:
   name: yolo
   labels:
     app: yolo
-    env: dev
     release: monitoring
 spec:
   selector:
     matchLabels:
       app: yolo
-      env: dev
   namespaceSelector:
     matchNames:
       - dev
+      - prod
   endpoints:
     - targetPort: 8080
       path: /metrics
