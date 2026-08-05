@@ -49,10 +49,14 @@ if ! command -v aws &> /dev/null; then
   ./aws/install
 fi
 
-# --- set node labels for AWS zone/region before kubelet starts ---
+# --- set node labels and providerID before kubelet starts ---
+# providerID lets Cluster Autoscaler map this Node back to its EC2 instance
+# (no cloud-controller-manager on this self-managed cluster, so kubelet never
+# sets spec.providerID on its own)
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-echo "KUBELET_EXTRA_ARGS=--node-labels=topology.kubernetes.io/zone=$AZ,topology.kubernetes.io/region=${region}" | tee /etc/default/kubelet
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+echo "KUBELET_EXTRA_ARGS=--node-labels=topology.kubernetes.io/zone=$AZ,topology.kubernetes.io/region=${region} --provider-id=aws:///$AZ/$INSTANCE_ID" | tee /etc/default/kubelet
 
 # --- fetch join command from SSM and join (idempotent guard) ---
 if [ ! -f /etc/kubernetes/kubelet.conf ]; then

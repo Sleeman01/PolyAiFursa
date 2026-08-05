@@ -202,6 +202,21 @@ resource "aws_autoscaling_group" "workers" {
     value               = "sleeman-${var.cluster_name}-worker"
     propagate_at_launch = true
   }
+
+  # Cluster Autoscaler discovery/IAM-condition tags (static --nodes= mode still
+  # expects these for node-group metadata and the SetDesiredCapacity/Terminate
+  # IAM condition below)
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/enabled"
+    value               = "true"
+    propagate_at_launch = false
+  }
+
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/sleeman-${var.cluster_name}"
+    value               = "owned"
+    propagate_at_launch = false
+  }
 }
 
 # --- SNS topic for ASG lifecycle events ---
@@ -234,6 +249,44 @@ resource "aws_iam_role_policy" "node_sns_publish" {
         Effect   = "Allow"
         Action   = ["sns:Publish"]
         Resource = aws_sns_topic.alerts_topic.arn
+      }
+    ]
+  })
+}
+
+# --- Cluster Autoscaler permissions (static --nodes= mode, single ASG) ---
+resource "aws_iam_role_policy" "cluster_autoscaler" {
+  name = "sleeman-${var.cluster_name}-cluster-autoscaler"
+  role = aws_iam_role.node_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances",
+          "autoscaling:DescribeLaunchConfigurations",
+          "autoscaling:DescribeScalingActivities",
+          "autoscaling:DescribeTags",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeLaunchTemplateVersions"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:SetDesiredCapacity",
+          "autoscaling:TerminateInstanceInAutoScalingGroup"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/sleeman-${var.cluster_name}" = "owned"
+          }
+        }
       }
     ]
   })
