@@ -17,3 +17,7 @@ variable "instance_key_name" {
 variable "region" {
   type = string
 }
+
+variable "alert_email" {
+  type = string
+}

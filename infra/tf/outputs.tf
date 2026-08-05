@@ -9,3 +9,7 @@ output "control_plane_private_ip" {
 output "asg_name" {
   value = module.k8s_cluster.asg_name
 }
+
+output "alerts_topic_arn" {
+  value = module.k8s_cluster.alerts_topic_arn
+}

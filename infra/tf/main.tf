@@ -50,6 +50,7 @@ module "k8s_cluster" {
   public_subnet_ids  = module.vpc.public_subnets
   instance_key_name  = var.instance_key_name
   region             = var.region
+  alert_email        = var.alert_email
 }
 
 module "ingress" {

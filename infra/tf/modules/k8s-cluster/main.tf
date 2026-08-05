@@ -192,6 +192,36 @@ resource "aws_sns_topic" "lifecycle_topic" {
   name = "sleeman-${var.cluster_name}-lifecycle-topic"
 }
 
+# --- SNS topic for Alertmanager notifications ---
+resource "aws_sns_topic" "alerts_topic" {
+  name = "sleeman-${var.cluster_name}-alerts-topic"
+}
+
+resource "aws_sns_topic_subscription" "alerts_email" {
+  topic_arn = aws_sns_topic.alerts_topic.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+# --- Allow cluster nodes to publish to the alerts topic. No IRSA on this
+# self-managed cluster; Alertmanager's sigv4 auth falls back to the
+# instance's IAM role via node_role/node_profile. ---
+resource "aws_iam_role_policy" "node_sns_publish" {
+  name = "sleeman-${var.cluster_name}-node-sns-publish"
+  role = aws_iam_role.node_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = aws_sns_topic.alerts_topic.arn
+      }
+    ]
+  })
+}
+
 # --- IAM role for Lambda ---
 data "aws_iam_policy_document" "lambda_assume_role" {
   statement {

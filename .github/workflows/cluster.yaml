@@ -51,7 +51,7 @@ jobs:
 
       - name: Terraform Apply
         working-directory: infra/tf
-        run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars"
+        run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars" -var="alert_email=${{ secrets.ALERT_EMAIL }}"
 
       - name: Get control plane IP
         id: tf_output
