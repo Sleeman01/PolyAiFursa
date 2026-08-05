@@ -122,6 +122,16 @@ resource "aws_instance" "control_plane" {
     volume_type = "gp3"
   }
 
+  # http_put_response_hop_limit must be >=2 for pods (not just the host) to
+  # reach IMDS - the pod network adds a hop beyond direct host access, and
+  # the AWS default of 1 causes IMDSv2 token requests from pods to silently
+  # time out (discovered via Alertmanager's SNS credential fetch failing)
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2
+    http_tokens                 = "optional"
+  }
+
   user_data = templatefile("${path.module}/scripts/control-plane-init.sh.tftpl", {
     region              = var.region
     cluster_name        = var.cluster_name
@@ -152,6 +162,13 @@ resource "aws_launch_template" "worker" {
       volume_size = 20
       volume_type = "gp3"
     }
+  }
+
+  # See aws_instance.control_plane above for why hop_limit=2 is required
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2
+    http_tokens                 = "optional"
   }
 
   user_data = base64encode(templatefile("${path.module}/scripts/worker-init.sh.tftpl", {
