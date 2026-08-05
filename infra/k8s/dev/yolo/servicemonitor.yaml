@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: yolo
+  labels:
+    app: yolo
+    env: dev
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: yolo
+      env: dev
+  namespaceSelector:
+    matchNames:
+      - dev
+  endpoints:
+    - targetPort: 8080
+      path: /metrics
+      interval: 30s
