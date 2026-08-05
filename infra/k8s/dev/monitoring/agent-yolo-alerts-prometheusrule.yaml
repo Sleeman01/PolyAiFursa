@@ -15,6 +15,7 @@ spec:
           for: 5m
           labels:
             severity: warning
+            namespace: dev
           annotations:
             summary: "Agent /chat p95 latency is high"
             description: "p95 latency for agent chat requests has exceeded 30s over the last 5m."
@@ -30,6 +31,7 @@ spec:
           for: 2m
           labels:
             severity: critical
+            namespace: dev
           annotations:
             summary: "Yolo service error rate is high"
             description: "More than 10% of yolo requests have returned 5xx over the last 5m."
