@@ -4,16 +4,15 @@ metadata:
   name: agent
   labels:
     app: agent
-    env: dev
     release: monitoring
 spec:
   selector:
     matchLabels:
       app: agent
-      env: dev
   namespaceSelector:
     matchNames:
       - dev
+      - prod
   endpoints:
     - targetPort: 8000
       path: /metrics
