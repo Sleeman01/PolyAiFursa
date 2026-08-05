@@ -200,7 +200,7 @@ jobs:
             --set cloudProvider=aws \
             --set awsRegion=${{ inputs.region }} \
             --set autoscalingGroups[0].name=sleeman-polyai-k8s-workers-asg \
-            --set autoscalingGroups[0].minSize=1 \
+            --set autoscalingGroups[0].minSize=0 \
             --set autoscalingGroups[0].maxSize=3 \
             --set image.tag=v1.30.7 \
             --wait --timeout 5m
