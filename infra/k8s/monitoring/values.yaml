@@ -1,0 +1,21 @@
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-sc
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 3Gi
+
+grafana:
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: ebs-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi

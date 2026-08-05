@@ -1,7 +1,8 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: grafana
+  name: grafana-prod
+  namespace: monitoring
   labels:
     app: grafana
     env: prod
@@ -18,6 +19,6 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service:
-                name: grafana
+                name: monitoring-grafana
                 port:
-                  number: 3000
+                  number: 80
