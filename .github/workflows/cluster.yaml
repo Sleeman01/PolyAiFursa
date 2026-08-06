@@ -138,7 +138,7 @@ jobs:
               "--validating-webhook-key=/usr/local/certificates/key",
               "--enable-metrics=true"
             ]},
-            {"op":"add","path":"/spec/template/spec/containers/0/ports/-","value":{"name":"metrics","containerPort":10254,"protocol":"TCP"}}
+            {"op":"replace","path":"/spec/template/spec/containers/0/ports","value":[{"name":"http","containerPort":80,"protocol":"TCP"},{"name":"https","containerPort":443,"protocol":"TCP"},{"name":"webhook","containerPort":8443,"protocol":"TCP"},{"name":"metrics","containerPort":10254,"protocol":"TCP"}]}
           ]'
 
           kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=180s
