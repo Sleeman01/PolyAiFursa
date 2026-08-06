@@ -53,6 +53,13 @@ jobs:
         working-directory: infra/tf
         run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars" -var="alert_email=${{ secrets.ALERT_EMAIL }}"
 
+      - name: Scale up worker ASG
+        run: |
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name sleeman-polyai-k8s-workers-asg \
+            --min-size 2 --desired-capacity 2 \
+            --region ${{ inputs.region }}
+
       - name: Get control plane IP
         id: tf_output
         working-directory: infra/tf
