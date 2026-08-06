@@ -53,6 +53,13 @@ jobs:
         working-directory: infra/tf
         run: terraform apply -auto-approve -var-file="tfvars/${{ inputs.region }}.tfvars" -var="alert_email=${{ secrets.ALERT_EMAIL }}"
 
+      - name: Scale up worker ASG
+        run: |
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name sleeman-polyai-k8s-workers-asg \
+            --min-size 2 --desired-capacity 2 \
+            --region ${{ inputs.region }}
+
       - name: Get control plane IP
         id: tf_output
         working-directory: infra/tf
@@ -82,6 +89,19 @@ jobs:
           done
           echo "Control plane never became ready"
           exit 1
+
+      - name: Fetch kubeconfig artifact
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/home/ubuntu/.kube/config \
+            ./kubeconfig
+          sed -i "s#server: https://.*:6443#server: https://${{ needs.provision.outputs.control_plane_ip }}:6443#" ./kubeconfig
+
+      - name: Upload kubeconfig artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: ./kubeconfig
 
       - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, Ingress, ArgoCD Applications)
         run: |
@@ -165,10 +185,18 @@ jobs:
           scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             infra/k8s/monitoring/values.yaml \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/monitoring-values.yaml
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            infra/k8s/dev/prometheus/storageclass.yaml \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/storageclass.yaml
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
           set -euxo pipefail
           export KUBECONFIG=/home/ubuntu/.kube/config
+          # ebs-sc must exist before Helm creates PVCs for Prometheus/Grafana;
+          # ArgoCD's dev Application also applies this manifest, but hasn't synced
+          # yet this early in bootstrap - kubectl apply is idempotent so this is safe
+          kubectl apply -f /tmp/storageclass.yaml
+
 
           if ! command -v helm &> /dev/null; then
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
