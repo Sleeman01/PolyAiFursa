@@ -83,6 +83,19 @@ jobs:
           echo "Control plane never became ready"
           exit 1
 
+      - name: Fetch kubeconfig artifact
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/home/ubuntu/.kube/config \
+            ./kubeconfig
+          sed -i "s#server: https://.*:6443#server: https://${{ needs.provision.outputs.control_plane_ip }}:6443#" ./kubeconfig
+
+      - name: Upload kubeconfig artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: ./kubeconfig
+
       - name: Idempotently bootstrap cluster (Calico, ArgoCD, EBS CSI driver, Ingress, ArgoCD Applications)
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
