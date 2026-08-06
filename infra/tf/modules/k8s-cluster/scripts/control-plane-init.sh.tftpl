@@ -87,7 +87,7 @@ kubectl --kubeconfig=/etc/kubernetes/admin.conf label node "$NODE_NAME" topology
 
 
 # --- store join command for worker nodes ---
-kubeadm token create --print-join-command > /tmp/join-command.sh
+kubeadm token create --ttl 0 --print-join-command > /tmp/join-command.sh
 aws ssm put-parameter \
   --region ${region} \
   --name "/sleeman/${cluster_name}/join-command" \
