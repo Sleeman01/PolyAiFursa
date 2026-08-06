@@ -185,10 +185,18 @@ jobs:
           scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             infra/k8s/monitoring/values.yaml \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/monitoring-values.yaml
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
+            infra/k8s/dev/prometheus/storageclass.yaml \
+            ubuntu@${{ needs.provision.outputs.control_plane_ip }}:/tmp/storageclass.yaml
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/cluster_key.pem \
             ubuntu@${{ needs.provision.outputs.control_plane_ip }} bash << 'REMOTE_SCRIPT'
           set -euxo pipefail
           export KUBECONFIG=/home/ubuntu/.kube/config
+          # ebs-sc must exist before Helm creates PVCs for Prometheus/Grafana;
+          # ArgoCD's dev Application also applies this manifest, but hasn't synced
+          # yet this early in bootstrap - kubectl apply is idempotent so this is safe
+          kubectl apply -f /tmp/storageclass.yaml
+
 
           if ! command -v helm &> /dev/null; then
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
